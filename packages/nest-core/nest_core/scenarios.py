@@ -175,3 +175,9 @@ def _try_load_builtin(name: str) -> None:
         from nest_core.scenarios_builtin.sybil_bond import sybil_bond_factory
 
         register_scenario("sybil_bond", sybil_bond_factory)
+    elif name == "efs_scribe_offline":
+        from nest_core.scenarios_builtin.efs_scribe_offline import (
+            efs_scribe_offline_factory,
+        )
+
+        register_scenario("efs_scribe_offline", efs_scribe_offline_factory)
