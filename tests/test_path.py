@@ -413,6 +413,14 @@ def test_index_without_agent_name_is_refused(tmp_path, capsys):
     assert not out.exists()
 
 
+def test_run_path_test_refuses_index_without_agent_name(tmp_path):
+    index = _write_index(tmp_path / "index.json")
+
+    with pytest.raises(ValueError, match="needs an agent name"):
+        run_path_test(None, str(tmp_path / "runs"), index_file=index)
+    assert not (tmp_path / "runs").exists()
+
+
 def _shell_argv(command):
     """The argv a POSIX shell gives the recorded command, without running it."""
     shown = subprocess.run(

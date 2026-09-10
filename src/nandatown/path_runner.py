@@ -219,6 +219,9 @@ def run_path_test(subject_url: str | None, out_dir: str,
         # a different URL as the subject.
         raise ValueError("give either a subject URL or an index file, not"
                          " both")
+    if index_file and not agent_name:
+        raise ValueError("an index file needs an agent name to choose its"
+                         " entry")
     profile = get_path_profile(profile_ref or DEFAULT_PATH_PROFILE)
     strict_semantics = _strict_path_semantics(profile)
     run_id = "path-" + uuid.uuid4().hex[:12]
