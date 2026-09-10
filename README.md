@@ -480,9 +480,12 @@ an empty `coverage.not_tested` list. Partial or failed receipts remain valid
 signed evidence; they cannot earn this badge. `receipt` and bundle-aware
 `verify-receipt` first run the `verify` checks and refuse, naming the problem,
 when hashes, the manifest, cross-record bindings, an attestation or evaluator
-replay fail. A historical bundle whose only problem is an older evaluator
-version is still accepted, and the output says `evaluator replay not checked`.
-Bundle-aware verification then checks that claims, coverage and time window
+replay fail. A bundle recorded by a known earlier evaluator version for its
+mode (one this project shipped) is still accepted when every other check
+passes: its recorded result is not replayed, and the command prints
+`evaluator replay not checked`. That line is command output only; the signed
+receipt does not record it. A bundle naming an unrecognised evaluator version
+is refused. Bundle-aware verification then checks that claims, coverage and time window
 agree with the bundle; without `--bundle` it checks only the receipt's shape
 and signature.
 Review subject URLs, release labels and custom limitations before sharing:

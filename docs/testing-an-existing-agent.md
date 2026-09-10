@@ -126,8 +126,10 @@ not pass, evidence is stale, or verification fails. A refusal does not invalidat
 an honest signed partial receipt. Complete passing evidence can render the scoped
 badge; the signature proves key commitment, not agent safety or independent agreement.
 `receipt` and `verify-receipt --bundle` refuse a bundle that fails `verify`,
-except that a bundle from an older evaluator version is accepted with an
-explicit `evaluator replay not checked` line.
+with one exception: a bundle recorded by a known earlier evaluator version for
+its mode is accepted, and the command prints `evaluator replay not checked`.
+That line is command output only and is not recorded in the signed receipt.
+A bundle naming an unrecognised evaluator version is refused.
 
 Review URLs, labels, events, receipts and attachments for secrets before sharing.
 Do not send `state/` or private keystores in a public handoff. Preserve the five
