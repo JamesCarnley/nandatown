@@ -1,3 +1,5 @@
+import pytest
+
 from nandatown.evaluator import EVALUATOR_VERSION, evaluate
 from nandatown.records import TestProfile, TownEvent
 
@@ -130,3 +132,68 @@ def test_wakeup_and_ack_fault_checks():
     missing = evaluate(profile("lost_ack"), "run-1", clean_events())
     assert stage(missing, "ack_retry_survived").status == "not_enough_evidence"
     assert missing.verdict == "incomplete"
+
+
+def second_response_events():
+    """A seller that answers the one request twice, under two identities."""
+    return clean_events()[:-1] + [
+        ev(11, "message_accepted", "r-1-again", kind="quote_response",
+           sender="seller", to="buyer", request_id="q-1"),
+        ev(12, "run_finished", "run-1"),
+    ]
+
+
+def test_second_distinct_response_fails_response_and_correct():
+    result = evaluate(profile(), "run-1", second_response_events())
+    response = stage(result, "response")
+    assert response.status == "failed"
+    assert "2 distinct quote responses" in response.note
+    assert {"ev-6", "ev-11"} <= set(response.evidence)
+    assert stage(result, "correct").status == "failed"
+    assert result.verdict == "failed"
+
+
+def test_redelivered_request_answered_under_fresh_identity_fails():
+    events = clean_events() + [
+        ev(11, "duplicate_offered", "q-1"),
+        ev(12, "message_accepted", "r-9f3a", kind="quote_response",
+           sender="seller", to="buyer", request_id="q-1"),
+        ev(13, "ack_recorded", "q-1", observer="seller", status="processed",
+           note={"duplicate": True}, attempt=2),
+    ]
+    result = evaluate(profile("duplicate_delivery"), "run-1", events)
+    assert stage(result, "response").status == "failed"
+    assert "2 distinct quote responses" in stage(result, "response").note
+    assert result.verdict == "failed"
+
+
+def test_idempotent_response_retry_is_not_a_second_response():
+    # Resending the same identity with identical content returns the
+    # original acceptance: the town records a replay, not a new message.
+    events = clean_events() + [
+        ev(11, "duplicate_offered", "q-1"),
+        ev(12, "replay_returned", "r-1", sender="seller"),
+        ev(13, "ack_recorded", "q-1", observer="seller", status="processed",
+           note={"duplicate": True}, attempt=2),
+    ]
+    result = evaluate(profile("duplicate_delivery"), "run-1", events)
+    assert stage(result, "response").status == "passed"
+    assert stage(result, "duplicate_recognized").status == "passed"
+    assert result.verdict == "passed"
+
+
+def test_recorded_0_2_0_rules_are_unchanged():
+    # 0.2.0 neither counted nor correlated responses. Bundles recorded
+    # under it keep that meaning when replayed.
+    legacy = evaluate(profile(), "run-1", second_response_events(),
+                      version="0.2.0")
+    assert legacy.evaluator_version == "0.2.0"
+    assert legacy.verdict == "passed"
+    current = evaluate(profile(), "run-1", second_response_events())
+    assert current.evaluator_version == EVALUATOR_VERSION == "0.3.0"
+    assert current.verdict == "failed"
+
+
+def test_unknown_evaluator_version_is_refused():
+    with pytest.raises(ValueError, match="unsupported Track evaluator"):
+        evaluate(profile(), "run-1", clean_events(), version="9.9.9")

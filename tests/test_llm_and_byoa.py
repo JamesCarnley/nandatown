@@ -103,6 +103,30 @@ def test_byoa_external_seller_end_to_end(tmp_path):
     assert verify_bundle(bundle_dir) == []
 
 
+SELLER_VARIANT = os.path.join(REPO_ROOT, "tests", "fixtures",
+                              "track_seller_variant.py")
+
+
+@pytest.mark.parametrize("profile_name, mode, expected_note", [
+    ("quote-clean", "dupresp", "2 distinct quote responses"),
+    ("quote-duplicate-delivery", "uuidresp", "2 distinct quote responses"),
+])
+def test_fixture_seller_response_faults_fail_through_real_runner(
+        tmp_path, profile_name, mode, expected_note):
+    # A Town-authored stdlib seller over real localhost HTTP: a second
+    # distinct response, or one naming another request, is a failure even
+    # though the stock buyer found the total correct.
+    bundle_dir, result = run_town(
+        profile_name, str(tmp_path),
+        external={"seller": [sys.executable, SELLER_VARIANT, mode]})
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert stage(result, "response").status == "failed", detail
+    assert expected_note in stage(result, "response").note, detail
+    assert stage(result, "correct").status == "failed", detail
+    assert result.verdict == "failed", detail
+    assert verify_bundle(bundle_dir) == []
+
+
 def _spawn_environment_probe(tmp_path, inherit_env=False):
     output = tmp_path / ("inherited.json" if inherit_env else "builtin.json")
     script = (

@@ -15,13 +15,16 @@ from nandatown.bundle import (
 from nandatown.identity_portable import Keystore
 from nandatown.path_runner import run_path_test
 from nandatown.report import render_report
-from nandatown.evaluator import evaluate
+from nandatown.evaluator import EVALUATOR_VERSION, evaluate
 from nandatown.records import RunRecord, fingerprint
 
 from test_evaluator import clean_events, profile
 
 SCOPE_SENTENCE = ("This result applies only to the named agents, releases,"
                   " scenario, failure, evaluator, and time window.")
+# Genuine bundles written by the Track 0.2.0 evaluator at df0b5f1: the stock
+# quote-clean agents, and a Town fixture seller that answered twice.
+TRACK_0_2_0_BUNDLES = Path(__file__).parent / "fixtures" / "track-0.2.0"
 
 
 def make_bundle(tmp_path):
@@ -33,7 +36,7 @@ def make_bundle(tmp_path):
         created_at=1.0,
         participants=[{"name": "buyer", "role": "buyer"},
                       {"name": "seller", "role": "seller"}],
-        releases={"nandatown": "0.2.0", "evaluator": "0.2.0",
+        releases={"nandatown": "0.2.0", "evaluator": EVALUATOR_VERSION,
                   "python": "3.14"},
     )
     intents = [{"intent_id": "in-1", "run_id": "run-1", "at": 1.0,
@@ -451,9 +454,32 @@ def test_historical_evaluator_mismatch_remains_explicit(tmp_path):
     problems = verify_bundle(path)
 
     assert problems == [
-        "evaluator version differs: bundle historical-evaluator, local 0.2.0;"
+        "evaluator version differs: bundle historical-evaluator, local 0.3.0;"
         " reproducibility not checked"
     ]
+
+
+@pytest.mark.parametrize("name", ["quote-clean-stock", "quote-clean-dupresp"])
+def test_track_0_2_0_bundle_replays_under_its_recorded_rules(name):
+    path = TRACK_0_2_0_BUNDLES / name
+
+    assert verify_bundle(str(path)) == []
+    recorded = load_bundle(str(path))["result"]
+    assert recorded.evaluator_version == "0.2.0"
+    assert recorded.verdict == "passed"
+
+
+def test_track_0_2_0_result_is_not_upgraded_by_the_current_evaluator():
+    # The recorded 0.2.0 pass stands for 0.2.0; the current rules judge the
+    # same events differently and say so, instead of rewriting the bundle.
+    bundle = load_bundle(str(TRACK_0_2_0_BUNDLES / "quote-clean-dupresp"))
+    current = evaluate(bundle["profile"], bundle["run"].run_id,
+                       bundle["events"])
+    response = next(s for s in current.stages if s.name == "response")
+    assert current.evaluator_version == EVALUATOR_VERSION != "0.2.0"
+    assert response.status == "failed"
+    assert "2 distinct quote responses" in response.note
+    assert current.verdict == "failed"
 
 
 def test_manifest_version_must_match_run_release(tmp_path):

@@ -14,7 +14,11 @@ import time
 
 from .records import EvidenceResult, StageResult, TestProfile, TownEvent
 
-EVALUATOR_VERSION = "0.2.0"
+EVALUATOR_VERSION = "0.3.0"
+# Recorded bundles replay under the rules that produced them. 0.2.0 took
+# the first accepted quote response and did not count responses.
+LEGACY_EVALUATOR_VERSION = "0.2.0"
+EVALUATOR_VERSIONS = (LEGACY_EVALUATOR_VERSION, EVALUATOR_VERSION)
 
 REQUEST_KIND = "quote_request"
 RESPONSE_KIND = "quote_response"
@@ -33,8 +37,26 @@ def _missing(name: str, note: str) -> StageResult:
                        note=note)
 
 
-def evaluate(profile: TestProfile, run_id: str,
-             events: list[TownEvent]) -> EvidenceResult:
+def _response_mismatch(responses: list[TownEvent],
+                       request_id: str | None) -> tuple[str, str] | None:
+    """Why the accepted quote responses cannot stand as the one answer to
+    the accepted request, as (status, note). None when they can, or when
+    there is nothing to judge yet (that stays missing).
+
+    Each distinct message identity is accepted once; an idempotent resend
+    of the same identity and content is a replay, not a second response.
+    """
+    if len(responses) > 1:
+        return "failed", (f"{len(responses)} distinct quote responses were"
+                          " accepted, expected one (an idempotent resend of"
+                          " one identity is not counted)")
+    return None
+
+
+def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
+             version: str = EVALUATOR_VERSION) -> EvidenceResult:
+    if version not in EVALUATOR_VERSIONS:
+        raise ValueError(f"unsupported Track evaluator version {version!r}")
     seller = next((n for n, r in profile.roles.items() if r == "seller"), "seller")
     buyer = next((n for n, r in profile.roles.items() if r == "buyer"), "buyer")
 
@@ -107,7 +129,15 @@ def evaluate(profile: TestProfile, run_id: str,
     response_id = accepted_resp[0].subject if accepted_resp else None
     buyer_claims = (find("message_claimed", subject=response_id,
                          claimant=buyer) if response_id else [])
-    if accepted_resp and buyer_claims:
+    mismatch = (None if version == LEGACY_EVALUATOR_VERSION
+                else _response_mismatch(accepted_resp, request_id))
+    if mismatch is not None and mismatch[0] == "failed":
+        stages.append(_failed("response",
+                              [r.event_id for r in accepted_resp],
+                              mismatch[1]))
+    elif mismatch is not None:
+        stages.append(_missing("response", mismatch[1]))
+    elif accepted_resp and buyer_claims:
         stages.append(_passed("response", [accepted_resp[0].event_id,
                                            buyer_claims[0].event_id]))
     else:
@@ -118,9 +148,24 @@ def evaluate(profile: TestProfile, run_id: str,
     # correct: the buyer's own assertion about the total.
     buyer_acks = (find("ack_recorded", observer=buyer, subject=response_id)
                   if response_id else [])
+    if mismatch is not None:
+        # The assertion may concern any of the responses in question.
+        buyer_acks = [a for r in accepted_resp
+                      for a in find("ack_recorded", observer=buyer,
+                                    subject=r.subject)]
     verdict_acks = [a for a in buyer_acks
                     if "correct" in a.detail.get("note", {})]
-    if verdict_acks:
+    if verdict_acks and mismatch is not None and mismatch[0] == "failed":
+        stages.append(_failed(
+            "correct", [a.event_id for a in verdict_acks],
+            "the buyer's assertion cannot establish the answer to the"
+            f" accepted request: {mismatch[1]}"))
+    elif (verdict_acks and mismatch is not None
+          and verdict_acks[0].detail["note"]["correct"]):
+        stages.append(_missing(
+            "correct", "the buyer's assertion concerns a response not shown"
+                       f" to answer the accepted request: {mismatch[1]}"))
+    elif verdict_acks:
         note = verdict_acks[0].detail["note"]
         if note["correct"]:
             stages.append(_passed("correct", [verdict_acks[0].event_id]))
@@ -234,7 +279,7 @@ def evaluate(profile: TestProfile, run_id: str,
                  " --identity for grant-based portable identity"))
 
     cascade_unreached(stages)
-    return EvidenceResult(run_id=run_id, evaluator_version=EVALUATOR_VERSION,
+    return EvidenceResult(run_id=run_id, evaluator_version=version,
                           stages=stages, verdict=stage_verdict(stages),
                           evaluated_at=time.time())
 
