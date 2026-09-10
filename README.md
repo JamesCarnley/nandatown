@@ -190,6 +190,17 @@ Path evaluators are versioned. Replay a `path-0.1` bundle with its matching
 than treating the bundle as corrupt. The bundle's existing signature remains
 valid for its recorded bytes.
 
+The Track evaluator is `0.3.0`. Its `response` stage requires exactly one
+distinct accepted `quote_response`, whose body `request_id` names the accepted
+request; the town records that `request_id` on the `message_accepted` event. A
+second response under another identity, or a response naming another request,
+fails `response`, and the buyer's correctness assertion about it fails `correct`.
+A response without `request_id` is not enough evidence. Resending one identity
+with identical content is a replay, not a second response. Track bundles
+recorded under `0.2.0` replay under their recorded `0.2.0` rules, which took the
+first response without counting or correlating responses; their results are not
+upgraded.
+
 Stages are separate claims with separate failure boundaries. An HTTP success is never proof an agent understood or completed a task. Missing evidence stays missing. Every event names its observer; attribution in a local trace is not independent authentication of every asserted fact.
 
 ## Tier two: real model participants
