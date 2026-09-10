@@ -537,7 +537,11 @@ nandatown pulse --records --db pulse.db
 A sandbox test at onboarding is one moment and cannot show next week.
 Pulse probes each target on a schedule, keeps the full history in
 SQLite, reports availability per service, and exports every probe as an
-operational-history evidence record.
+operational-history evidence record. A target name is a label, not an
+identity: if a name is re-pointed at another URL, the report describes the
+URL it was last probed at and keeps each earlier URL's figures separate
+rather than blending them. URLs are compared exactly, so `/health` and
+`/health/` count as different endpoints.
 
 ## Campaigns
 

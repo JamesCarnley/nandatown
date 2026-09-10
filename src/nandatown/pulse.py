@@ -62,28 +62,44 @@ def run_pulse(targets: dict[str, str], count: int, interval: float,
 
 
 def availability(db_path: str) -> dict[str, dict[str, Any]]:
+    """Availability per target name, attributed to the endpoint probed.
+
+    A name is an operator's label, not an identity, and can be re-pointed
+    at another URL. Probes of different URLs are never blended: the
+    headline figures describe the URL the name was probed at most
+    recently, and each earlier URL keeps its own figures, in order of its
+    last probe, under ``previous_endpoints``. URLs are compared exactly,
+    and a URL a name returns to keeps all of its probes.
+    """
     with _conn(db_path) as conn:
         rows = conn.execute(
             "SELECT name, url, at, ok, latency_ms FROM probes"
-            " ORDER BY at").fetchall()
-    out: dict[str, dict[str, Any]] = {}
+            " ORDER BY at, rowid").fetchall()
+    series: dict[str, dict[str, dict[str, Any]]] = {}
     for name, url, at, ok, latency in rows:
-        entry = out.setdefault(name, {"url": url, "checks": 0, "up": 0,
-                                      "first_at": at, "last_at": at,
-                                      "last_ok": bool(ok),
-                                      "latencies": []})
+        endpoints = series.setdefault(name, {})
+        # Re-insert so each name's endpoints stay ordered by latest probe.
+        entry = endpoints.pop(url, None) or {
+            "url": url, "checks": 0, "up": 0, "first_at": at,
+            "last_at": at, "last_ok": bool(ok), "latencies": []}
+        endpoints[url] = entry
         entry["checks"] += 1
         entry["up"] += ok
         entry["last_at"] = at
         entry["last_ok"] = bool(ok)
         if ok:
             entry["latencies"].append(latency)
-    for entry in out.values():
-        entry["availability"] = round(100.0 * entry["up"]
-                                      / entry["checks"], 1)
-        lat = entry.pop("latencies")
-        entry["median_latency_ms"] = (sorted(lat)[len(lat) // 2]
-                                      if lat else None)
+    out: dict[str, dict[str, Any]] = {}
+    for name, endpoints in series.items():
+        for entry in endpoints.values():
+            entry["availability"] = round(100.0 * entry["up"]
+                                          / entry["checks"], 1)
+            lat = entry.pop("latencies")
+            entry["median_latency_ms"] = (sorted(lat)[len(lat) // 2]
+                                          if lat else None)
+        *previous, current = endpoints.values()
+        current["previous_endpoints"] = previous
+        out[name] = current
     return out
 
 
@@ -116,6 +132,15 @@ def render_pulse_report(db_path: str) -> str:
         lines.append(
             f"{name.ljust(width)}  {s['availability']:5.1f}% of"
             f" {s['checks']} checks, now {state}{latency}")
+        if s["previous_endpoints"]:
+            indent = " " * (width + 2)
+            lines.append(f"{indent}current endpoint {s['url']}")
+            for p in s["previous_endpoints"]:
+                last = "up" if p["last_ok"] else "DOWN"
+                lines.append(
+                    f"{indent}earlier endpoint {p['url']}:"
+                    f" {p['availability']:.1f}% of {p['checks']} checks,"
+                    f" last {last}")
     lines.append("")
     lines.append("A one-time test at publish time would show none of"
                  " this. History is the evidence.")
