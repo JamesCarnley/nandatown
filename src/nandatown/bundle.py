@@ -167,30 +167,56 @@ def load_bundle(directory: str) -> dict[str, Any]:
     }
 
 
+# Every evaluator version main has recorded in bundles, per bundle mode.
+# Source: `git log -p -G'EVALUATOR_VERSION *=' -- src/` and the
+# quote-intent return in path_runner.path_evaluator_version, checked
+# against each first-parent commit of main: Track evaluator.py (d32d3e1);
+# Lab sim/validators.py (cb19e0e, 7af8084, d26ca5a, f4e85d7, 9f2e361,
+# 6a697f2, de57461); Path path_runner.py (5aab66a, 64ecb5f, 2209bbf,
+# d55b7e3). Receipts accept a bundle recorded by an earlier version
+# listed here without replaying it and refuse any other version. Add a
+# version here when it merges.
+SHIPPED_EVALUATOR_VERSIONS: dict[str, frozenset[str]] = {
+    "track": frozenset({"0.2.0"}),
+    "lab": frozenset({"lab-0.2.0", "lab-0.2.1", "lab-0.2.2", "lab-0.2.3",
+                      "lab-0.2.4", "lab-0.2.5", "lab-0.2.6"}),
+    "path": frozenset({"path-0.1", "path-0.2", "path-0.3",
+                       "path-quote-intent-0.1", "path-quote-intent-0.2"}),
+}
+
+
 class EvaluatorVersionDiffers(str):
     """The verify_bundle problem for a bundle from another evaluator version.
 
-    Replay needs the evaluator version the bundle names, so a historical
-    bundle's recorded result is not reproduced; every other check still
-    runs. This is the one verify_bundle problem that is not an integrity
-    failure. It is a ``str`` carrying the unchanged message, so
-    verify_bundle's return contract is the same for every caller.
+    Replay needs the evaluator version the bundle names, so the recorded
+    result is not reproduced; every other check still runs. It is a
+    ``str`` carrying the unchanged message, so verify_bundle's return
+    contract is the same for every caller. Only a version listed in
+    SHIPPED_EVALUATOR_VERSIONS for the bundle's mode is historical.
     """
 
     bundle_version: str
     local_version: str
+    mode: str
 
-    def __new__(cls, bundle_version: str,
-                local_version: str) -> EvaluatorVersionDiffers:
+    def __new__(cls, bundle_version: str, local_version: str,
+                mode: str) -> EvaluatorVersionDiffers:
         problem = super().__new__(
             cls, f"evaluator version differs: bundle {bundle_version},"
                  f" local {local_version}; reproducibility not checked")
         problem.bundle_version = bundle_version
         problem.local_version = local_version
+        problem.mode = mode
         return problem
 
-    def __getnewargs__(self) -> tuple[str, str]:
-        return self.bundle_version, self.local_version
+    def __getnewargs__(self) -> tuple[str, str, str]:
+        return self.bundle_version, self.local_version, self.mode
+
+    @property
+    def shipped(self) -> bool:
+        """Whether this project shipped the bundle's version for its mode."""
+        return self.bundle_version in SHIPPED_EVALUATOR_VERSIONS.get(
+            self.mode, frozenset())
 
 
 def verify_bundle_integrity(
@@ -198,16 +224,24 @@ def verify_bundle_integrity(
     """verify_bundle, split for callers that accept historical bundles.
 
     Returns every integrity problem (records, hashes, manifest,
-    cross-record bindings, unsupported evaluator, replay mismatch under the
-    local evaluator, attestation) and, separately, the evaluator version
-    difference that left replay unchecked, if any."""
+    cross-record bindings, unsupported or unrecognised evaluator, replay
+    mismatch under the local evaluator, attestation) and, separately, the
+    evaluator version difference that left replay unchecked when the
+    bundle names an earlier version shipped for its mode. Any other
+    version can be neither replayed nor recognised, so it is an
+    integrity problem."""
     integrity: list[str] = []
     differs: EvaluatorVersionDiffers | None = None
     for problem in verify_bundle(directory):
-        if isinstance(problem, EvaluatorVersionDiffers):
+        if not isinstance(problem, EvaluatorVersionDiffers):
+            integrity.append(problem)
+        elif problem.shipped:
             differs = problem
         else:
-            integrity.append(problem)
+            integrity.append(
+                f"unrecognised evaluator version {problem.bundle_version}"
+                f" for {problem.mode} bundles (local"
+                f" {problem.local_version}); replay not possible")
     return integrity, differs
 
 
@@ -348,7 +382,7 @@ def verify_bundle(directory: str) -> list[str]:
     if expected_version is not None \
             and recorded.evaluator_version != expected_version:
         problems.append(EvaluatorVersionDiffers(
-            recorded.evaluator_version, expected_version))
+            recorded.evaluator_version, expected_version, bundle["mode"]))
     elif replay_fn is not None and records_coherent:
         try:
             replay = replay_fn(

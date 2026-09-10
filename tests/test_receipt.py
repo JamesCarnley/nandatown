@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from nandatown.receipt import (
     verify_receipt,
 )
 from nandatown.records import fingerprint
+from nandatown.runner import run_town
 from nandatown.sim.runner import run_lab
 from nandatown.sim.validators import LAB_EVALUATOR_VERSION
 
@@ -473,3 +475,77 @@ def test_historical_evaluator_bundle_still_refuses_integrity_failures(
         make_receipt(bundle_dir)
     assert main(["receipt", bundle_dir]) == 1
     assert expected in capsys.readouterr().out
+
+
+def _forge_evaluator_version(directory, version):
+    """Relabel a bundle as passed under an evaluator version: labelled
+    consistently and rehashed, with the attestation dropped, so no key is
+    needed. Only a replay would expose the relabelled verdict."""
+    bundle = Path(directory)
+    _relabel_failed_as_passed(directory)
+    _edit_json(bundle / "result.json",
+               lambda result: result.update(evaluator_version=version))
+    _edit_json(bundle / "run.json",
+               lambda run: run["releases"].update(evaluator=version))
+    _edit_json(bundle / "manifest.json",
+               lambda manifest: manifest.update(evaluator_version=version))
+    _rehash(directory, "result.json", "run.json")
+    (bundle / "attestation.json").unlink(missing_ok=True)
+
+
+def _failed_path_bundle(tmp_path):
+    return failed_bundle(tmp_path), "path"
+
+
+def _lab_bundle(tmp_path):
+    bundle_dir, _ = run_lab("voting", str(tmp_path))
+    return bundle_dir, "lab"
+
+
+def _track_bundle(tmp_path):
+    bundle_dir, _ = run_town("quote-clean", str(tmp_path))
+    return bundle_dir, "track"
+
+
+@pytest.mark.parametrize(
+    ("make_bundle", "version"),
+    [(_failed_path_bundle, "zzz-any"),
+     (_failed_path_bundle, "path-9.0"),
+     (_failed_path_bundle, "lab-0.2.5"),
+     (_lab_bundle, "zzz-any"),
+     (_lab_bundle, "lab-9.0.0"),
+     (_track_bundle, "zzz-any")],
+    ids=["path-made-up", "path-future", "path-other-mode", "lab-made-up",
+         "lab-future", "track-made-up"],
+)
+def test_receipts_refuse_unrecognised_evaluator_versions(
+        tmp_path, capsys, make_bundle, version):
+    bundle_dir, mode = make_bundle(tmp_path)
+    _forge_evaluator_version(bundle_dir, version)
+    receipt_path = Path(bundle_dir) / "receipt.json"
+    reason = f"unrecognised evaluator version {version} for {mode} bundles"
+    # verify reports the same single difference to every other caller.
+    problems = verify_bundle(bundle_dir)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(
+        f"evaluator version differs: bundle {version}, local ")
+
+    with pytest.raises(ValueError, match=re.escape(reason)):
+        make_receipt(bundle_dir)
+    assert not receipt_path.exists()
+    assert main(["receipt", bundle_dir]) == 1
+    out = capsys.readouterr().out
+    assert reason in out
+    assert "receipt written" not in out
+    assert "not checked" not in out
+    assert not receipt_path.exists()
+
+    unverified = _sign_unverified_receipt(
+        bundle_dir, Keystore(str(tmp_path / "keys")))
+    assert verify_receipt(unverified) == []
+    assert any(reason in p for p in verify_receipt(unverified, bundle_dir))
+    assert main(["verify-receipt", unverified, "--bundle", bundle_dir]) == 1
+    out = capsys.readouterr().out
+    assert reason in out
+    assert "receipt verifies" not in out
+    assert "not checked" not in out

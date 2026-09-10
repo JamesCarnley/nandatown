@@ -239,9 +239,12 @@ def bundle_receipt_check(bundle_dir: str) -> tuple[list[str], str | None]:
     """Whether a receipt may rest on this bundle.
 
     Returns the bundle's integrity problems, any one of which refuses a
-    receipt, and a disclosure for a historical bundle recorded by another
-    evaluator version: its hashes, manifest, bindings and attestation were
-    verified, but its recorded result was not replayed."""
+    receipt, and a disclosure for a bundle recorded by a known earlier
+    evaluator version (bundle.SHIPPED_EVALUATOR_VERSIONS for its mode):
+    its hashes, manifest, bindings and attestation were verified, but its
+    recorded result was not replayed. An unrecognised evaluator version is
+    an integrity problem. The disclosure is command output; the signed
+    receipt does not record it."""
     from .bundle import verify_bundle_integrity
 
     problems, differs = verify_bundle_integrity(bundle_dir)
@@ -257,6 +260,13 @@ def bundle_receipt_check(bundle_dir: str) -> tuple[list[str], str | None]:
 def make_receipt(bundle_dir: str, keystore=None,
                  signer: str | None = None,
                  limitations: list[str] | None = None) -> str:
+    """Sign a sanitized receipt over a bundle; returns its path.
+
+    Raises ValueError, naming each problem, when the bundle fails
+    bundle_receipt_check. A bundle recorded by a known earlier evaluator
+    version is accepted without replay, and neither the returned path nor
+    the signed receipt says so: call bundle_receipt_check for that
+    disclosure, as the `receipt` command does."""
     from .bundle import load_bundle
     from .identity_portable import (
         OPERATOR_NAME,
@@ -301,7 +311,10 @@ def verify_receipt(receipt_path: str,
     """Offline verification. Returns problems; empty means the receipt
     verifies (which still proves commitment, not truth). With a bundle,
     the bundle must also pass bundle_receipt_check and match every
-    receipt claim."""
+    receipt claim. An empty result over a bundle recorded by a known
+    earlier evaluator version does not say that its result was not
+    replayed: bundle_receipt_check returns that disclosure, which
+    `verify-receipt --bundle` prints."""
     from .identity_portable import verify_signature
 
     problems: list[str] = []
