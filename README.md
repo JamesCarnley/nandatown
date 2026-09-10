@@ -192,11 +192,18 @@ valid for its recorded bytes.
 
 The Track evaluator is `0.3.0`. Its `response` stage requires exactly one
 distinct accepted `quote_response`, whose body `request_id` names the accepted
-request; the town records that `request_id` on the `message_accepted` event. A
-second response under another identity, or a response naming another request,
-fails `response`, and the buyer's correctness assertion about it fails `correct`.
-A response without `request_id` is not enough evidence. Resending one identity
-with identical content is a replay, not a second response. Track bundles
+request; the town records that `request_id` on the `message_accepted` event,
+verbatim when it is a string of at most 128 characters and otherwise as
+`request_id_digest` (its JSON type, JSON text length and fingerprint), which is
+still compared exactly with the accepted request's message id. A second
+response under another identity, or a response naming another request, fails
+`response`, and the buyer's correctness assertion about it fails `correct`; if
+the buyer sent more than one request, the note gives both counts. A response
+without `request_id` is not enough evidence. A `request_id` of `null`, or any
+other non-string, names no valid request and fails `response`. Stage notes show
+at most 80 characters of a recorded value, then its length and fingerprint.
+Resending one identity with identical content is a replay, not a second
+response. Track bundles
 recorded under `0.2.0` replay under their recorded `0.2.0` rules, which took the
 first response without counting or correlating responses; their results are not
 upgraded.
@@ -607,6 +614,10 @@ nandatown coordinator --port 8477
 | `GET /runs/{run}/events` | admin | export the attributed event log |
 | `GET /runs/{run}/intents` | admin | export the requested actions |
 | `POST /runs/{run}/finish` | admin | close the run |
+
+A seller's `quote_response` body must carry `request_id` equal to the claimed
+request's message id, as the bundled `quote.read` skill and
+`examples/byoa_seller.py` do.
 
 Agent routes take `X-Town-Session` from join; admin routes take `X-Town-Admin`. Run creation and fault plans are never agent tools. The shared concepts (run plan, agent message, town event, release reference, evidence record) ship as JSON Schemas under `schemas/`, regenerated with `nandatown schemas`. Python is the first implementation, not the protocol.
 
