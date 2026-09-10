@@ -7,11 +7,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nandatown.a2a_adapter import build_a2a_app, build_agent_card
-from nandatown.bundle import attest_bundle, verify_bundle
+from nandatown.bundle import attest_bundle, load_bundle, verify_bundle
 from nandatown.cli import main
 from nandatown.identity_portable import Keystore
 from nandatown.path_runner import run_path_test
-from nandatown.receipt import make_receipt, render_proof, verify_receipt
+from nandatown.receipt import (
+    DEFAULT_LIMITATIONS,
+    _bundle_receipt_fields,
+    make_receipt,
+    render_proof,
+    verify_receipt,
+)
 from nandatown.records import fingerprint
 
 
@@ -100,12 +106,37 @@ def test_proof_requires_evaluator_replay_not_just_valid_signatures(tmp_path):
     with pytest.raises(ValueError, match="evaluator replay mismatch"):
         make_receipt(str(directory))
     assert not (directory / "receipt.json").exists()
+    # A receipt signed over these bytes without that check still verifies
+    # on its own; proof must refuse it rather than trust the signature.
+    receipt_path = _sign_receipt_without_bundle_check(
+        directory, Keystore(str(tmp_path / "keys")))
+    assert verify_receipt(str(receipt_path)) == []
+    original_receipt = receipt_path.read_bytes()
 
     ok, text = render_proof(str(directory))
 
     assert not ok
     assert "evaluator replay mismatch" in text
     assert "TOWN-TESTED" not in text
+    assert receipt_path.read_bytes() == original_receipt
+
+
+def _sign_receipt_without_bundle_check(directory, keys):
+    """Sign what a bundle says about itself, as `receipt` did before it
+    verified the bundle."""
+    fields = _bundle_receipt_fields(load_bundle(str(directory)))
+    identity = keys.new_identity("reviewer")
+    payload = {"claim": fields["claim"], "observer": identity["agent_id"],
+               "window": fields["window"], "coverage": fields["coverage"],
+               "limitations": DEFAULT_LIMITATIONS,
+               "evidence": fields["evidence"]}
+    receipt_path = directory / "receipt.json"
+    receipt_path.write_text(json.dumps({
+        "payload": payload,
+        "signature": keys.sign("reviewer", payload),
+        "controller_public": identity["controller_public"],
+    }))
+    return receipt_path
 
 
 def test_partial_receipt_remains_independently_verifiable(tmp_path):
