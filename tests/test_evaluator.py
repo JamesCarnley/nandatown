@@ -1,7 +1,12 @@
 import pytest
 
 from nandatown.evaluator import EVALUATOR_VERSION, evaluate
-from nandatown.records import TestProfile, TownEvent
+from nandatown.records import (
+    TestProfile,
+    TownEvent,
+    canonical_json,
+    fingerprint,
+)
 
 
 def profile(fault="none") -> TestProfile:
@@ -202,6 +207,99 @@ def test_response_without_request_id_is_not_enough_evidence():
     assert stage(result, "response").status == "not_enough_evidence"
     assert stage(result, "correct").status == "not_enough_evidence"
     assert result.verdict == "incomplete"
+
+
+OVERSIZED_REQUEST_ID = "q-1-" + "x" * 200_000
+# Worst case: two bounded values (response and accepted request) plus prose.
+NOTE_BOUND = 512
+
+
+def digest(value):
+    """The bounded description the town records for a request_id that is
+    not a short string."""
+    return {"type": {str: "string", type(None): "null", int: "number"}[
+                type(value)],
+            "json_length": len(canonical_json(value)),
+            "fingerprint": fingerprint(value)}
+
+
+def response_events(request_message_id="q-1", **correlation):
+    """clean_events with the request identity and the response's recorded
+    correlation detail replaced."""
+    events = clean_events()
+    events[3] = ev(4, "message_accepted", request_message_id,
+                   kind="quote_request", sender="buyer", to="seller")
+    events[4] = ev(5, "message_claimed", request_message_id,
+                   claimant="seller", attempt=1)
+    events[5] = ev(6, "message_accepted", "r-1", kind="quote_response",
+                   sender="seller", to="buyer", **correlation)
+    events[6] = ev(7, "ack_recorded", request_message_id, observer="seller",
+                   status="processed",
+                   note={"applied": True, "total_cents": 3990}, attempt=1)
+    return events
+
+
+def assert_notes_bounded(result):
+    for s in result.stages:
+        assert len(s.note) < NOTE_BOUND, (s.name, len(s.note))
+
+
+@pytest.mark.parametrize("request_message_id", ["q-1", "q-" + "7" * 300])
+def test_digest_of_the_accepted_request_id_passes(request_message_id):
+    # Correlation stays exact when the town recorded only a digest.
+    result = evaluate(profile(), "run-1", response_events(
+        request_message_id, request_id_digest=digest(request_message_id)))
+    assert stage(result, "response").status == "passed"
+    assert result.verdict == "passed"
+
+
+def test_digest_of_another_request_id_fails_with_small_notes():
+    # Same prefix as the accepted request, but not the same value.
+    result = evaluate(profile(), "run-1", response_events(
+        request_id_digest=digest(OVERSIZED_REQUEST_ID)))
+    response = stage(result, "response")
+    assert response.status == "failed"
+    assert fingerprint(OVERSIZED_REQUEST_ID)[:23] in response.note
+    assert str(len(canonical_json(OVERSIZED_REQUEST_ID))) in response.note
+    assert stage(result, "correct").status == "failed"
+    assert result.verdict == "failed"
+    assert_notes_bounded(result)
+
+
+def test_oversized_request_ids_are_bounded_in_notes():
+    long_request = "q-" + "7" * 5_000
+    result = evaluate(profile(), "run-1", response_events(
+        long_request, request_id=OVERSIZED_REQUEST_ID))
+    response = stage(result, "response")
+    assert response.status == "failed"
+    assert fingerprint(OVERSIZED_REQUEST_ID)[:23] in response.note
+    assert fingerprint(long_request)[:23] in response.note
+    assert stage(result, "correct").status == "failed"
+    assert_notes_bounded(result)
+
+
+@pytest.mark.parametrize("correlation", [
+    {"request_id": None}, {"request_id_digest": digest(None)}],
+    ids=["recorded-null", "digest-of-null"])
+def test_null_request_id_names_no_request_and_fails(correlation):
+    result = evaluate(profile(), "run-1", response_events(**correlation))
+    response = stage(result, "response")
+    assert response.status == "failed"
+    assert "JSON null" in response.note and "None" not in response.note
+    assert stage(result, "correct").status == "failed"
+
+
+@pytest.mark.parametrize("correlation", [
+    {"request_id": 7}, {"request_id": ["q-1"]},
+    {"request_id_digest": digest(7)}, {"request_id_digest": "q-1"},
+    {"request_id_digest": {"type": "string"}}],
+    ids=["number", "array", "digest-of-number", "malformed-digest",
+         "incomplete-digest"])
+def test_non_string_or_malformed_correlation_fails(correlation):
+    result = evaluate(profile(), "run-1", response_events(**correlation))
+    assert stage(result, "response").status == "failed"
+    assert result.verdict == "failed"
+    assert_notes_bounded(result)
 
 
 def test_recorded_0_2_0_rules_are_unchanged():

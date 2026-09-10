@@ -8,6 +8,8 @@ modes:
   dupresp      answer one request with two distinct response identities
   uuidresp     answer a redelivered request under a fresh response identity
   norequestid  answer with a request_id naming a request that does not exist
+  hugerequestid  answer with a ~200 KB request_id that starts with the
+               request's id but is not it
 """
 
 import json
@@ -75,6 +77,8 @@ def main():
         body = claim["body"]
         total = body["quantity"] * body["unit_price_cents"]
         request_id = "q-does-not-exist" if MODE == "norequestid" else mid
+        if MODE == "hugerequestid":
+            request_id = mid + "-" + "x" * 200_000
         reply = {"message_id": "r-" + mid.removeprefix("q-"),
                  "to": claim["from"], "kind": "quote_response",
                  "body": {"request_id": request_id, "total_cents": total}}

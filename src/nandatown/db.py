@@ -15,7 +15,27 @@ import uuid
 from contextlib import contextmanager
 from typing import Any
 
-from .records import fingerprint
+from .records import canonical_json, fingerprint, json_type
+
+# A message body's request_id names the request it answers (the quote.read
+# skill: a quote_response carries the request id). The town records it on
+# message_accepted so correlation is judged from events without exporting
+# the body: verbatim while it is a string of at most this many characters,
+# otherwise as a bounded digest of the full value (JSON type, JSON text
+# length, fingerprint), which keeps event detail small and still lets the
+# evaluator compare it exactly with the accepted request's message id.
+REQUEST_ID_RECORD_CHARS = 128
+
+
+def _correlation_detail(body: dict) -> dict[str, Any]:
+    if "request_id" not in body:
+        return {}
+    value = body["request_id"]
+    if isinstance(value, str) and len(value) <= REQUEST_ID_RECORD_CHARS:
+        return {"request_id": value}
+    return {"request_id_digest": {"type": json_type(value),
+                                  "json_length": len(canonical_json(value)),
+                                  "fingerprint": fingerprint(value)}}
 
 
 class IdentityReuse(Exception):
@@ -369,13 +389,8 @@ class TownDB:
                      "suppressed" if suppress_notify else "pending"),
                 )
                 detail = {"sender": sender, "to": to, "kind": kind,
-                          "content_fingerprint": content_fingerprint}
-                if "request_id" in body:
-                    # The request this message says it answers (the
-                    # quote.read skill: a quote_response carries the
-                    # request id), so correlation is judged from events
-                    # without exporting the body.
-                    detail["request_id"] = body["request_id"]
+                          "content_fingerprint": content_fingerprint,
+                          **_correlation_detail(body)}
                 self._event(conn, run_id, now, "town", "message_accepted",
                             message_id, detail)
                 return now, False

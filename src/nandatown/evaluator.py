@@ -12,7 +12,15 @@ from __future__ import annotations
 
 import time
 
-from .records import EvidenceResult, StageResult, TestProfile, TownEvent
+from .records import (
+    EvidenceResult,
+    StageResult,
+    TestProfile,
+    TownEvent,
+    canonical_json,
+    fingerprint,
+    json_type,
+)
 
 EVALUATOR_VERSION = "0.3.0"
 # Recorded bundles replay under the rules that produced them. 0.2.0 took
@@ -24,8 +32,14 @@ EVALUATOR_VERSIONS = (LEGACY_EVALUATOR_VERSION, EVALUATOR_VERSION)
 REQUEST_KIND = "quote_request"
 RESPONSE_KIND = "quote_response"
 # The quote.read skill: a quote_response carries the request id. The town
-# records the body's request_id on message_accepted.
+# records the body's request_id on message_accepted: verbatim while it is a
+# short string, otherwise as a bounded digest (JSON type, JSON text length,
+# fingerprint of the full value) under CORRELATION_DIGEST_FIELD.
 CORRELATION_FIELD = "request_id"
+CORRELATION_DIGEST_FIELD = "request_id_digest"
+JSON_TYPES = ("string", "number", "boolean", "null", "array", "object")
+# A stage note shows at most this many characters of a recorded value.
+NOTE_VALUE_CHARS = 80
 
 
 def _passed(name: str, evidence: list[str], note: str = "") -> StageResult:
@@ -57,15 +71,62 @@ def _response_mismatch(responses: list[TownEvent],
     if not responses or request_id is None:
         return None
     detail = responses[0].detail
-    if CORRELATION_FIELD not in detail:
+    if CORRELATION_FIELD in detail:
+        named = detail[CORRELATION_FIELD]
+        if isinstance(named, str) and named == request_id:
+            return None
+        shape, shown = ("string" if isinstance(named, str) else "other",
+                        _show_value(named))
+    elif CORRELATION_DIGEST_FIELD in detail:
+        digest = detail[CORRELATION_DIGEST_FIELD]
+        if (isinstance(digest, dict) and digest.get("type") == "string"
+                and digest.get("fingerprint") == fingerprint(request_id)):
+            return None
+        shape, shown = _show_digest(digest)
+    else:
         return "not_enough_evidence", (
             "the quote response carries no request_id, so it is not shown"
             " to answer the accepted request")
-    if detail[CORRELATION_FIELD] != request_id:
-        return "failed", (
-            f"the quote response names request {detail[CORRELATION_FIELD]!r},"
-            f" not the accepted request {request_id!r}")
-    return None
+    accepted = _show_value(request_id)
+    if shape == "string":
+        return "failed", (f"the quote response names request {shown}, not"
+                          f" the accepted request {accepted}")
+    if shape == "malformed":
+        return "failed", (f"the quote response's recorded request_id digest"
+                          f" {shown} is malformed and names no request; the"
+                          f" accepted request is {accepted}")
+    return "failed", (f"the quote response's request_id is {shown}, which is"
+                      " not a string and names no request; the accepted"
+                      f" request is {accepted}")
+
+
+def _show_value(value: object) -> str:
+    """A recorded value for a stage note: its JSON text when short (JSON
+    null for null), otherwise its first NOTE_VALUE_CHARS characters, its
+    length and its fingerprint. Notes stay small whatever was recorded."""
+    text = canonical_json(value)
+    if not isinstance(value, str):
+        text = ("JSON null" if value is None
+                else f"a JSON {json_type(value)} {text}")
+    if len(text) <= NOTE_VALUE_CHARS:
+        return text
+    return (f"{text[:NOTE_VALUE_CHARS]}… ({len(canonical_json(value))}"
+            f" JSON characters, {fingerprint(value)[:23]}…)")
+
+
+def _show_digest(digest: object) -> tuple[str, str]:
+    """(shape, text) for a recorded request_id digest; shape is string,
+    other or malformed."""
+    if not (isinstance(digest, dict) and digest.get("type") in JSON_TYPES
+            and type(digest.get("json_length")) is int
+            and 0 <= digest["json_length"] < 10 ** 15
+            and isinstance(digest.get("fingerprint"), str)):
+        return "malformed", _show_value(digest)
+    if digest["type"] == "null":
+        return "other", "JSON null"
+    return ("string" if digest["type"] == "string" else "other",
+            f"a JSON {digest['type']} of {digest['json_length']} JSON"
+            f" characters ({digest['fingerprint'][:23]}…)")
 
 
 def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],

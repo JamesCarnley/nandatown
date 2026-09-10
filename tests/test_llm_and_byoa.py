@@ -8,6 +8,7 @@ import pytest
 
 import nandatown.runner as runner_module
 from nandatown.bundle import load_bundle, verify_bundle
+from nandatown.report import render_report
 from nandatown.participants.llm import (
     MESSAGE_BUDGET,
     TOOLS,
@@ -135,6 +136,35 @@ def test_fixture_seller_response_faults_fail_through_real_runner(
                      and e.detail.get("kind") == "quote_response"]
         assert [e.detail.get("request_id") for e in responses] == [
             "q-does-not-exist"]
+
+
+def test_oversized_request_id_keeps_the_bundle_small(tmp_path):
+    # A ~200 KB request_id is judged exactly, but recorded and reported
+    # only as a bounded digest; the stored judgment still replays.
+    bundle_dir, result = run_town(
+        "quote-clean", str(tmp_path),
+        external={"seller": [sys.executable, SELLER_VARIANT,
+                             "hugerequestid"]})
+    detail = [(s.name, s.status, s.note[:200]) for s in result.stages]
+    assert stage(result, "response").status == "failed", detail
+    assert stage(result, "correct").status == "failed", detail
+    assert result.verdict == "failed", detail
+    assert verify_bundle(bundle_dir) == []
+    assert all(len(s.note) < 400 for s in result.stages), detail
+    bundle = load_bundle(bundle_dir)
+    response = next(e for e in bundle["events"]
+                    if e.kind == "message_accepted"
+                    and e.detail.get("kind") == "quote_response")
+    assert "request_id" not in response.detail
+    assert response.detail["request_id_digest"]["type"] == "string"
+    assert response.detail["request_id_digest"]["json_length"] == (
+        len("q-1-") + 200_000 + 2)
+    sizes = {name: os.path.getsize(os.path.join(bundle_dir, name))
+             for name in ("result.json", "events.jsonl")}
+    sizes["report"] = len(render_report(bundle).encode())
+    assert sizes["result.json"] < 4_096, sizes
+    assert sizes["events.jsonl"] < 16_384, sizes
+    assert sizes["report"] < 8_192, sizes
 
 
 def _spawn_environment_probe(tmp_path, inherit_env=False):
