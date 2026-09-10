@@ -411,3 +411,38 @@ def test_index_without_agent_name_is_refused(tmp_path, capsys):
     assert main(["test-agent", "--index", index, "--out", str(out)]) == 2
     assert "--agent-name" in capsys.readouterr().out
     assert not out.exists()
+
+
+def _shell_argv(command):
+    """The argv a POSIX shell gives the recorded command, without running it."""
+    shown = subprocess.run(
+        ["/bin/sh", "-c", 'nandatown() { printf "%s\\n" "$@"; }\n' + command],
+        capture_output=True, text=True, timeout=10)
+    return shown.returncode, shown.stdout.splitlines()
+
+
+@pytest.mark.skipif(not os.path.exists("/bin/sh"), reason="needs /bin/sh")
+@pytest.mark.parametrize("via_index", [False, True])
+def test_generated_rerun_survives_a_real_shell(tmp_path, via_index):
+    """Catches shell metacharacters splitting the rerun into a different test."""
+    pin = "sha256:" + "0" * 64
+    if via_index:
+        index = _write_index(tmp_path / "my index.json")
+        subject, locator = None, ["--index", index, "--agent-name", "seller"]
+    else:
+        subject = SUBJECT + "/agents/x?tenant=alpha&region=eu"
+        index, locator = None, ["--url", subject]
+    with client() as http:
+        bundle_dir, _ = run_path_test(
+            subject, str(tmp_path / "runs"),
+            profile_ref="a2a-quote-intent@0.2", pin_card_digest=pin,
+            index_file=index, agent_name="seller" if via_index else None,
+            http=http)
+    rerun = load_bundle(bundle_dir)["run"].config["rerun_command"]
+
+    returncode, argv = _shell_argv(rerun)
+
+    assert returncode == 0, rerun
+    assert argv == ["test-agent", *locator,
+                    "--path-profile", "a2a-quote-intent@0.2",
+                    "--pin-card-digest", pin]

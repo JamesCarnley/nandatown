@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import time
 import uuid
@@ -358,14 +359,17 @@ def run_path_test(subject_url: str | None, out_dir: str,
 
     result = evaluate_path(profile, run_id, recorder.events)
 
-    rerun = "nandatown test-agent"
+    # Quoted per argument: a shell must not split a URL at "&" or a path at
+    # a space and silently rerun a different subject or profile.
+    rerun_argv = ["nandatown", "test-agent"]
     if index_file:
-        rerun += f" --index {index_file} --agent-name {agent_name}"
+        rerun_argv += ["--index", index_file, "--agent-name", str(agent_name)]
     else:
-        rerun += f" --url {subject_url}"
-    rerun += f" --path-profile {profile.ref}"
+        rerun_argv += ["--url", str(subject_url)]
+    rerun_argv += ["--path-profile", profile.ref]
     if pin_card_digest:
-        rerun += f" --pin-card-digest {pin_card_digest}"
+        rerun_argv += ["--pin-card-digest", pin_card_digest]
+    rerun = shlex.join(rerun_argv)
 
     run_record = RunRecord(
         run_id=run_id,
