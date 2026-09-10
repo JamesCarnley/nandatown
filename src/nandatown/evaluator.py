@@ -56,7 +56,7 @@ def _missing(name: str, note: str) -> StageResult:
 
 
 def _response_mismatch(responses: list[TownEvent],
-                       request_id: str | None) -> tuple[str, str] | None:
+                       requests: list[TownEvent]) -> tuple[str, str] | None:
     """Why the accepted quote responses cannot stand as the one answer to
     the accepted request, as (status, note). None when they can, or when
     there is nothing to judge yet (that stays missing).
@@ -64,6 +64,15 @@ def _response_mismatch(responses: list[TownEvent],
     Each distinct message identity is accepted once; an idempotent resend
     of the same identity and content is a replay, not a second response.
     """
+    request_id = requests[0].subject if requests else None
+    if len(responses) > 1 and len(requests) > 1:
+        # Not the one exchange the profile expects, but not a seller that
+        # answered one request twice either: say what was accepted.
+        return "failed", (f"{len(requests)} quote requests and"
+                          f" {len(responses)} distinct quote responses were"
+                          " accepted; the profile expects exactly one of each"
+                          " (an idempotent resend of one identity is not"
+                          " counted)")
     if len(responses) > 1:
         return "failed", (f"{len(responses)} distinct quote responses were"
                           " accepted, expected one (an idempotent resend of"
@@ -206,10 +215,13 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
     buyer_claims = (find("message_claimed", subject=response_id,
                          claimant=buyer) if response_id else [])
     mismatch = (None if version == LEGACY_EVALUATOR_VERSION
-                else _response_mismatch(accepted_resp, request_id))
+                else _response_mismatch(accepted_resp, accepted_req))
     if mismatch is not None and mismatch[0] == "failed":
+        # Several requests are part of why several responses fail.
+        cited = (accepted_req if len(accepted_req) > 1
+                 and len(accepted_resp) > 1 else [])
         stages.append(_failed("response",
-                              [r.event_id for r in accepted_resp],
+                              [e.event_id for e in cited + accepted_resp],
                               mismatch[1]))
     elif mismatch is not None:
         stages.append(_missing("response", mismatch[1]))

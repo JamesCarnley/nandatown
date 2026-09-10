@@ -158,6 +158,40 @@ def test_second_distinct_response_fails_response_and_correct():
     assert result.verdict == "failed"
 
 
+def test_two_requests_each_answered_once_names_both_counts():
+    # A buyer that sends two distinct requests, each answered correctly
+    # once: still not the one exchange the profile expects, but the note
+    # must not imply the seller duplicated its answer.
+    events = clean_events()[:-1] + [
+        ev(11, "message_accepted", "q-2", kind="quote_request",
+           sender="buyer", to="seller"),
+        ev(12, "message_claimed", "q-2", claimant="seller", attempt=1),
+        ev(13, "message_accepted", "r-2", kind="quote_response",
+           sender="seller", to="buyer", request_id="q-2"),
+        ev(14, "ack_recorded", "q-2", observer="seller", status="processed",
+           note={"applied": True, "total_cents": 3990}, attempt=1),
+        ev(15, "message_claimed", "r-2", claimant="buyer", attempt=1),
+        ev(16, "ack_recorded", "r-2", observer="buyer", status="processed",
+           note={"correct": True, "total_cents": 3990}, attempt=1),
+        ev(17, "run_finished", "run-1"),
+    ]
+    result = evaluate(profile(), "run-1", events)
+    response = stage(result, "response")
+    assert response.status == "failed"
+    assert response.note == (
+        "2 quote requests and 2 distinct quote responses were accepted; the"
+        " profile expects exactly one of each (an idempotent resend of one"
+        " identity is not counted)")
+    assert {"ev-4", "ev-11", "ev-6", "ev-13"} <= set(response.evidence)
+    assert stage(result, "correct").status == "failed"
+    assert response.note in stage(result, "correct").note
+    # One request answered twice keeps blaming the duplicate response.
+    single = stage(evaluate(profile(), "run-1", second_response_events()),
+                   "response")
+    assert single.note.startswith("2 distinct quote responses were accepted,"
+                                  " expected one")
+
+
 def test_redelivered_request_answered_under_fresh_identity_fails():
     events = clean_events() + [
         ev(11, "duplicate_offered", "q-1"),
