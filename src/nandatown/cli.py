@@ -352,6 +352,10 @@ def cmd_pulse(args: argparse.Namespace) -> int:
         if not url:
             print(f"target {target!r} must look like name=url")
             return 2
+        if name in targets:
+            print(f"target name {name!r} is given more than once; give"
+                  " each --target a distinct name")
+            return 2
         targets[name] = url
     if not targets:
         print("give at least one --target name=url, or --report /"

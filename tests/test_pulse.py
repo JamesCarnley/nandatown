@@ -70,6 +70,40 @@ def test_pulse_cli(tmp_path, capsys):
     assert main(["pulse", "--db", db]) == 2
 
 
+def start_counting_server():
+    hits = []
+
+    class CountingHandler(QuietHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            super().do_GET()
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), CountingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, f"http://127.0.0.1:{server.server_port}/health", hits
+
+
+def test_pulse_cli_refuses_reused_target_name_before_probing(tmp_path,
+                                                             capsys):
+    first, first_url, first_hits = start_counting_server()
+    second, second_url, second_hits = start_counting_server()
+    db = tmp_path / "pulse.db"
+    try:
+        code = main(["pulse", "--target", f"svc={first_url}",
+                     "--target", f"svc={second_url}", "--count", "1",
+                     "--interval", "0", "--db", str(db)])
+    finally:
+        for server in (first, second):
+            server.shutdown()
+            server.server_close()
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "target name 'svc' is given more than once" in out
+    assert first_hits == [] and second_hits == []
+    assert not db.exists()
+
+
 def test_free_port_probe_fails_cleanly(tmp_path):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
