@@ -175,22 +175,43 @@ def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
     if index_file:
         recorder.intend("town-requester", "resolve",
                         {"index": index_file, "agent": agent_name})
+
+        def fail(reason: str) -> tuple[None, None]:
+            recorder.emit("town-requester", "resolution_failed",
+                          agent_name or "?", {"reason": reason})
+            return None, None
+
         try:
             with open(index_file) as f:
                 index = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            recorder.emit("town-requester", "resolution_failed",
-                          agent_name or "?",
-                          {"reason": f"index unreadable: {exc}"})
-            return None, None
-        entry = (index.get("agents") or {}).get(agent_name or "")
+        except (OSError, ValueError, RecursionError) as exc:
+            # Includes invalid JSON, undecodable bytes and nesting past the
+            # recursion limit.
+            return fail(f"index unreadable: {exc}")
+        # The index is operator-supplied fixture JSON: check its shape
+        # before trusting it, and name the problem without echoing values.
+        if not isinstance(index, dict):
+            return fail("malformed index: top level must be a JSON object")
+        agents = index.get("agents")
+        if agents is not None and not isinstance(agents, dict):
+            return fail('malformed index: "agents" must be a JSON object')
+        entry = (agents or {}).get(agent_name or "")
+        if entry is not None and not isinstance(entry, dict):
+            return fail("malformed index: the entry for this agent must be"
+                        " a JSON object")
         if not entry or "url" not in entry:
-            recorder.emit("town-requester", "resolution_failed",
-                          agent_name or "?",
-                          {"reason": "missing card pointer: the pinned"
-                                     " index has no entry for this"
-                                     " agent"})
-            return None, None
+            return fail("missing card pointer: the pinned index has no"
+                        " entry for this agent")
+        if not isinstance(entry["url"], str) or not entry["url"]:
+            return fail('malformed index: the entry "url" must be a'
+                        " non-empty string")
+        digest = entry.get("card_digest")
+        if digest is not None and (not isinstance(digest, str)
+                                   or not digest):
+            # An empty pin would silently leave descriptor consistency
+            # untested instead of checking it.
+            return fail('malformed index: the entry "card_digest" must be'
+                        " a non-empty string")
         recorder.emit("town-requester", "resolution_hop",
                       agent_name or "?",
                       {"kind": "pinned-index", "index": index_file,

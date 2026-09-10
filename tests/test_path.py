@@ -239,6 +239,84 @@ def test_index_resolution_and_missing_pointer(tmp_path):
     assert missing.verdict == "failed"
 
 
+@pytest.mark.parametrize("index_json, reason", [
+    ([{"agents": {"maya-seller": {"url": SUBJECT}}}],
+     "top level must be a JSON object"),
+    (None, "top level must be a JSON object"),
+    ({"agents": [{"name": "maya-seller", "url": SUBJECT}]},
+     '"agents" must be a JSON object'),
+    ({"agents": {"maya-seller": f"url {SUBJECT}"}},
+     "the entry for this agent must be a JSON object"),
+    ({"agents": {"maya-seller": {"url": 5}}},
+     'the entry "url" must be a non-empty string'),
+    ({"agents": {"maya-seller": {"url": ""}}},
+     'the entry "url" must be a non-empty string'),
+    ({"agents": {"maya-seller": {"url": SUBJECT, "card_digest": 5}}},
+     'the entry "card_digest" must be a non-empty string'),
+    ({"agents": {"maya-seller": {"url": SUBJECT, "card_digest": ""}}},
+     'the entry "card_digest" must be a non-empty string'),
+], ids=["top-level-list", "top-level-null", "agents-list", "entry-string",
+        "url-number", "url-empty", "card-digest-number", "card-digest-empty"])
+def test_malformed_index_fails_resolution_with_verifiable_bundle(
+        tmp_path, index_json, reason):
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps(index_json))
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name="maya-seller", http=client())
+
+    resolution = stage(result, "resolution")
+    assert resolution.status == "failed"
+    assert resolution.note == f"malformed index: {reason}"
+    assert stage(result, "agent_card_retrieval").status == "not_tested"
+    assert result.verdict == "failed"
+    assert verify_bundle(bundle_dir) == []
+
+
+@pytest.mark.parametrize("raw", [
+    pytest.param('{"agents": {"maya-seller": {"url": "café"}}}'
+                 .encode("latin-1"), id="not-utf8"),
+    pytest.param(b"[" * 200_000 + b"]" * 200_000, id="nesting-too-deep"),
+])
+def test_unreadable_index_fails_resolution_with_verifiable_bundle(
+        tmp_path, raw):
+    index = tmp_path / "index.json"
+    index.write_bytes(raw)
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name="maya-seller", http=client())
+
+    resolution = stage(result, "resolution")
+    assert resolution.status == "failed"
+    assert resolution.note.startswith("index unreadable: ")
+    assert result.verdict == "failed"
+    assert verify_bundle(bundle_dir) == []
+
+
+def test_cli_malformed_index_writes_failed_resolution_bundle(tmp_path,
+                                                             capsys):
+    from nandatown.cli import main
+
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps(
+        {"agents": [{"name": "maya-seller", "url": SUBJECT}]}))
+
+    code = main(["test-agent", "--index", str(index), "--agent-name",
+                 "maya-seller", "--out", str(tmp_path / "runs")])
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert 'malformed index: "agents" must be a JSON object' in out
+    assert "0 of 6 path stages passed" in out
+    bundle_dir = out.split("Evidence bundle: ", 1)[1].strip()
+    resolution = next(s for s in load_bundle(bundle_dir)["result"].stages
+                      if s.name == "resolution")
+    assert resolution.status == "failed"
+    assert verify_bundle(bundle_dir) == []
+
+
 def test_town_driver_fault_is_an_error_not_a_failure(tmp_path,
                                                      monkeypatch):
     import nandatown.a2a_adapter as a2a
