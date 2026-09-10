@@ -21,6 +21,22 @@ def _is_lab(name: str) -> bool:
             or name.endswith((".yaml", ".yml")))
 
 
+def _print_join_credentials(role: str, env: dict[str, str]) -> None:
+    """Hand an outside agent its join environment while the run waits.
+
+    Shared by `test-agent --wait` and `run --agent ROLE=external`. Flush:
+    through a pipe (CI, tee) block buffering would otherwise hold the
+    credentials until after the run had stopped waiting.
+    """
+    import shlex
+
+    print(f"waiting for your {role}. Start it with this environment:")
+    for k, v in env.items():
+        print(f"  export {k}={shlex.quote(v)}")
+    print("then join, claim, work, acknowledge. The town is watching.",
+          flush=True)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from .bundle import load_bundle
     from .profiles import PROFILES
@@ -58,7 +74,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             bundle_dir, result = run_town(name, args.out,
                                           model=args.model,
                                           harnesses=harnesses or None,
-                                          identity_dir=identity_dir)
+                                          identity_dir=identity_dir,
+                                          on_credentials=(
+                                              _print_join_credentials))
         except RunnerUsageError as exc:
             print(exc)
             return 2
@@ -122,14 +140,7 @@ def cmd_test_agent(args: argparse.Namespace) -> int:
         creds_cb = None
     else:
         external = {args.role: None}
-
-        def creds_cb(role, env):
-            print(f"waiting for your {role}. Start it with this"
-                  " environment:")
-            for k, v in env.items():
-                print(f"  export {k}={v}")
-            print("then join, claim, work, acknowledge. The town is"
-                  " watching.")
+        creds_cb = _print_join_credentials
 
     profile = args.profile or "quote-clean"
     print(f"nandatown {__version__}: testing your {args.role} against"

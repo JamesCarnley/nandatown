@@ -154,6 +154,75 @@ def test_wait_handoff_records_external_participant_and_reconnect_rerun(
         "seller": "external participant must reconnect with fresh credentials"}
 
 
+@pytest.mark.parametrize("argv", [
+    ["run", "quote-clean", "--agent", "seller=external"],
+    ["test-agent", "--role", "seller", "--wait", "--timeout", "30"],
+], ids=["run-agent-external", "test-agent-wait"])
+def test_cli_prints_join_credentials_through_a_pipe_while_waiting(
+        tmp_path, argv):
+    """An operator (or CI) reads the credentials from the CLI's piped
+    stdout and starts the agent from them while the run is waiting."""
+    import queue
+    import threading
+    import time
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONUNBUFFERED"}
+    env["NANDATOWN_HOME"] = str(tmp_path / "home")
+    cli = subprocess.Popen(
+        [sys.executable, "-m", "nandatown.cli", *argv,
+         "--out", str(tmp_path / "runs")],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env=env)
+    lines: queue.Queue = queue.Queue()
+
+    def read() -> None:
+        for line in cli.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=read, daemon=True).start()
+    seen: list[str] = []
+    exports: dict[str, str] = {}
+    agent = None
+    try:
+        deadline = time.monotonic() + 20
+        while True:
+            try:
+                line = lines.get(
+                    timeout=max(deadline - time.monotonic(), 0.01))
+            except queue.Empty:
+                pytest.fail("no join credentials on the CLI's piped stdout"
+                            " within 20 s; output so far:\n"
+                            + "".join(seen))
+            if line is None:
+                pytest.fail("the CLI ended before handing out join"
+                            " credentials:\n" + "".join(seen))
+            seen.append(line)
+            if line.strip().startswith("export "):
+                key, _, value = shlex.split(line)[1].partition("=")
+                exports[key] = value
+            if line.strip().startswith("then join"):
+                break
+        assert cli.poll() is None, "credentials arrived after the run ended"
+        assert set(exports) == {"TOWN_URL", "RUN_ID", "NAME", "TOKEN",
+                                "STATE_DIR"}
+        assert exports["NAME"] == "seller"
+        agent = subprocess.Popen(
+            [sys.executable, EXAMPLE], env={**os.environ, **exports},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        exit_code = cli.wait(timeout=60)
+    finally:
+        for process in (cli, agent):
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+    while (line := lines.get(timeout=5)) is not None:
+        seen.append(line)
+    output = "".join(seen)
+    assert exit_code == 0, output
+    assert "Verdict:   PASSED" in output
+
+
 def test_llm_harness_overrides_scripted_profile(tmp_path):
     bundle_dir, result = run_town("quote-clean", str(tmp_path),
                                   harnesses={"seller": "llm:mock:alt"})
