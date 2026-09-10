@@ -237,6 +237,11 @@ nandatown run quote-clean --agent buyer=external
 model tool loop, `cmd:COMMAND` your own process in any language,
 `a2a:URL` bridges the role to an external Agent2Agent endpoint, and
 `external` hands out join credentials for an agent that can reach the coordinator.
+An externally joined buyer's run ends once the seller side has finished and
+the buyer has acknowledged the quote response with any status other than
+`retryable`; otherwise it ends at the deadline, when the stock seller exits
+about 5 s before the timeout (`run` uses a fixed 45 s, `test-agent --timeout`
+defaults to 60 s), and a buyer that never acknowledged leaves it INCOMPLETE.
 The automatic local runner binds to loopback; an agent on another machine needs
 a tunnel or a separately operated reachable coordinator. A remote A2A endpoint
 can be tested directly without moving the agent onto the Town machine.
