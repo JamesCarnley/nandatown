@@ -52,7 +52,7 @@ def _quote(order):
 
 
 def shaped_client(*, state="completed", second_state=None, layout="single",
-                  raw_status=MISSING):
+                  raw_status=MISSING, raw_text=MISSING):
     attempts = 0
 
     def handle(request):
@@ -63,7 +63,8 @@ def shaped_client(*, state="completed", second_state=None, layout="single",
         envelope = json.loads(request.content)
         order = json.loads(
             envelope["params"]["message"]["parts"][0]["text"])
-        first = {"kind": "text", "text": json.dumps(_quote(order))}
+        first = {"kind": "text", "text": raw_text if raw_text is not MISSING
+                 else json.dumps(_quote(order))}
         extra = {"kind": "text", "text": json.dumps({"hidden": True})}
         selected_layout = (
             "multiple_artifacts"
@@ -304,6 +305,80 @@ def test_strict_replay_rejects_extra_observed_fulfillment(tmp_path):
 
     assert any("evaluator replay mismatch" in problem
                for problem in problems), problems
+
+
+@pytest.mark.parametrize("profile_ref", [
+    STRICT_PRICE_PROFILE,
+    STRICT_QUOTE_PROFILE,
+])
+@pytest.mark.parametrize("raw_text", [
+    pytest.param("[" * 200_000 + "]" * 200_000, id="nesting-too-deep"),
+    pytest.param("1" * 5_000, id="integer-too-long"),
+    pytest.param(12345, id="non-string-text"),
+    pytest.param('{"request_id": "\\ud800", "total_cents": 3990}',
+                 id="lone-surrogate"),
+])
+def test_strict_unparseable_output_is_semantic_failure_not_town_error(
+        tmp_path, profile_ref, raw_text):
+    directory, result = _run(tmp_path, profile_ref, raw_text=raw_text)
+
+    assert _stage(result, "protocol_invocation").status == "passed"
+    semantic = _stage(result, "semantic_result")
+    assert semantic.status == "failed"
+    assert "not parseable" in semantic.note
+    assert result.verdict == "failed"
+    bundle = load_bundle(directory)
+    assert not any(event.kind == "town_driver_error"
+                   for event in bundle["events"])
+    assert len([event for event in bundle["events"]
+                if event.kind == "protocol_exchange"]) == 1
+    unparseable = [event for event in bundle["events"]
+                   if event.kind == "fulfillment_unparseable"]
+    assert len(unparseable) == 1
+    assert len(unparseable[0].detail["text"]) <= 200
+    assert verify_bundle(directory) == []
+
+
+@pytest.mark.parametrize("fault", [ValueError, TypeError])
+def test_strict_recording_fault_is_not_recorded_as_subject_output(
+        tmp_path, monkeypatch, fault):
+    """Catches a Town-side recording bug being blamed on the subject."""
+    import nandatown.path_runner as path_runner
+
+    original = path_runner._Recorder.emit
+
+    def emit(self, observer, kind, subject, detail=None):
+        if kind == "fulfillment_observed":
+            raise fault("simulated Town recording fault")
+        return original(self, observer, kind, subject, detail)
+
+    monkeypatch.setattr(path_runner._Recorder, "emit", emit)
+    directory, _ = _run(tmp_path, STRICT_PRICE_PROFILE)
+
+    kinds = [event.kind for event in load_bundle(directory)["events"]]
+    assert "fulfillment_unparseable" not in kinds
+    if fault is TypeError:
+        assert "town_driver_error" in kinds
+
+
+def test_legacy_profile_keeps_recorded_undecodable_output_events(tmp_path):
+    """Legacy evidence semantics are frozen, including their known quirks."""
+    legacy = "a2a-capability-fulfillment@0.2"
+
+    directory, result = _run(tmp_path / "deep", legacy,
+                             raw_text="[" * 200_000 + "]" * 200_000)
+    events = load_bundle(directory)["events"]
+    assert [e.kind for e in events].count("town_driver_error") == 1
+    assert result.verdict == "error"
+    assert verify_bundle(directory) == []
+
+    directory, _ = _run(tmp_path / "long", legacy, raw_text="1" * 5_000)
+    events = load_bundle(directory)["events"]
+    exchanges = [e for e in events if e.kind == "protocol_exchange"
+                 and e.detail["attempt"] == 1]
+    assert [e.detail["ok"] for e in exchanges] == [True, False]
+    assert not any(e.kind == "fulfillment_unparseable" for e in events)
+    assert verify_bundle(directory) == []
 
 
 def test_strict_malformed_status_is_subject_failure_not_town_error(tmp_path):

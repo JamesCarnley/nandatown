@@ -307,27 +307,18 @@ def run_path_test(subject_url: str | None, out_dir: str,
                         text = artifact_text(task)
                     try:
                         fulfillment = json.loads(text)
-                        if not isinstance(fulfillment, dict):
-                            recorder.emit("town-requester", "fulfillment_unparseable",
-                                          order_id, {"attempt": attempt,
-                                                     "reason": "quote is not a JSON object"})
-                            if strict_semantics:
-                                break
-                            continue
-                        detail = {
-                            "attempt": attempt,
-                            "total_cents": fulfillment.get("total_cents"),
-                            "request_id": fulfillment.get("request_id"),
-                            "content_digest": fingerprint(fulfillment)}
-                        if _quote_intent_semantics(profile):
-                            detail["quote"] = {
-                                field: fulfillment[field] for field in QUOTE_INTENT_FIELDS
-                                if field in fulfillment}
-                        recorder.emit(
-                            "town-requester", "fulfillment_observed",
-                            order_id, detail)
-                    except (json.JSONDecodeError, TypeError) as exc:
-                        if isinstance(exc, TypeError) and not strict_semantics:
+                        content_digest = (fingerprint(fulfillment)
+                                          if isinstance(fulfillment, dict)
+                                          else None)
+                    except (ValueError, TypeError, RecursionError) as exc:
+                        # Output that cannot be decoded or digested (past
+                        # the recursion limit, oversized integers, lone
+                        # surrogates) is the subject's, never a Town error.
+                        # Only decoding is guarded, so a Town recording
+                        # fault is not blamed on the subject. Legacy
+                        # profiles keep their recorded behavior.
+                        if not strict_semantics and not isinstance(
+                                exc, json.JSONDecodeError):
                             raise
                         preview = (text[:200] if isinstance(text, str)
                                    else repr(text)[:200])
@@ -337,6 +328,26 @@ def run_path_test(subject_url: str | None, out_dir: str,
                                        "text": preview})
                         if strict_semantics:
                             break
+                        continue
+                    if not isinstance(fulfillment, dict):
+                        recorder.emit("town-requester", "fulfillment_unparseable",
+                                      order_id, {"attempt": attempt,
+                                                 "reason": "quote is not a JSON object"})
+                        if strict_semantics:
+                            break
+                        continue
+                    detail = {
+                        "attempt": attempt,
+                        "total_cents": fulfillment.get("total_cents"),
+                        "request_id": fulfillment.get("request_id"),
+                        "content_digest": content_digest}
+                    if _quote_intent_semantics(profile):
+                        detail["quote"] = {
+                            field: fulfillment[field] for field in QUOTE_INTENT_FIELDS
+                            if field in fulfillment}
+                    recorder.emit(
+                        "town-requester", "fulfillment_observed",
+                        order_id, detail)
                 except (ValueError, httpx.HTTPError) as exc:
                     recorder.emit("town-requester", "protocol_exchange",
                                   order_id,
