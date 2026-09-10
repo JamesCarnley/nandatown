@@ -16,12 +16,16 @@ from .records import EvidenceResult, StageResult, TestProfile, TownEvent
 
 EVALUATOR_VERSION = "0.3.0"
 # Recorded bundles replay under the rules that produced them. 0.2.0 took
-# the first accepted quote response and did not count responses.
+# the first accepted quote response; it neither counted responses nor
+# checked which request a response named.
 LEGACY_EVALUATOR_VERSION = "0.2.0"
 EVALUATOR_VERSIONS = (LEGACY_EVALUATOR_VERSION, EVALUATOR_VERSION)
 
 REQUEST_KIND = "quote_request"
 RESPONSE_KIND = "quote_response"
+# The quote.read skill: a quote_response carries the request id. The town
+# records the body's request_id on message_accepted.
+CORRELATION_FIELD = "request_id"
 
 
 def _passed(name: str, evidence: list[str], note: str = "") -> StageResult:
@@ -50,6 +54,17 @@ def _response_mismatch(responses: list[TownEvent],
         return "failed", (f"{len(responses)} distinct quote responses were"
                           " accepted, expected one (an idempotent resend of"
                           " one identity is not counted)")
+    if not responses or request_id is None:
+        return None
+    detail = responses[0].detail
+    if CORRELATION_FIELD not in detail:
+        return "not_enough_evidence", (
+            "the quote response carries no request_id, so it is not shown"
+            " to answer the accepted request")
+    if detail[CORRELATION_FIELD] != request_id:
+        return "failed", (
+            f"the quote response names request {detail[CORRELATION_FIELD]!r},"
+            f" not the accepted request {request_id!r}")
     return None
 
 

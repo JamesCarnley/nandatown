@@ -30,7 +30,7 @@ def clean_events():
            to="seller"),
         ev(5, "message_claimed", "q-1", claimant="seller", attempt=1),
         ev(6, "message_accepted", "r-1", kind="quote_response",
-           sender="seller", to="buyer"),
+           sender="seller", to="buyer", request_id="q-1"),
         ev(7, "ack_recorded", "q-1", observer="seller", status="processed",
            note={"applied": True, "total_cents": 3990}, attempt=1),
         ev(8, "message_claimed", "r-1", claimant="buyer", attempt=1),
@@ -95,7 +95,7 @@ def test_crash_profile_fault_checks():
         ev(8, "participant_restarted", "seller", observer="runner"),
         ev(10, "message_claimed", "q-1", claimant="seller", attempt=2),
         ev(11, "message_accepted", "r-1", kind="quote_response",
-           sender="seller", to="buyer"),
+           sender="seller", to="buyer", request_id="q-1"),
         ev(12, "ack_recorded", "q-1", observer="seller", status="processed",
            note={"applied": True, "total_cents": 3990}, attempt=2),
         ev(13, "message_claimed", "r-1", claimant="buyer", attempt=1),
@@ -180,6 +180,28 @@ def test_idempotent_response_retry_is_not_a_second_response():
     assert stage(result, "response").status == "passed"
     assert stage(result, "duplicate_recognized").status == "passed"
     assert result.verdict == "passed"
+
+
+def test_response_naming_another_request_fails():
+    events = clean_events()
+    events[5] = ev(6, "message_accepted", "r-1", kind="quote_response",
+                   sender="seller", to="buyer", request_id="q-does-not-exist")
+    result = evaluate(profile(), "run-1", events)
+    response = stage(result, "response")
+    assert response.status == "failed"
+    assert "q-does-not-exist" in response.note and "q-1" in response.note
+    assert stage(result, "correct").status == "failed"
+    assert result.verdict == "failed"
+
+
+def test_response_without_request_id_is_not_enough_evidence():
+    events = clean_events()
+    events[5] = ev(6, "message_accepted", "r-1", kind="quote_response",
+                   sender="seller", to="buyer")
+    result = evaluate(profile(), "run-1", events)
+    assert stage(result, "response").status == "not_enough_evidence"
+    assert stage(result, "correct").status == "not_enough_evidence"
+    assert result.verdict == "incomplete"
 
 
 def test_recorded_0_2_0_rules_are_unchanged():

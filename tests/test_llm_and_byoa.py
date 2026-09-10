@@ -101,6 +101,9 @@ def test_byoa_external_seller_end_to_end(tmp_path):
     assert secret not in serialized_run
     assert example not in serialized_run
     assert verify_bundle(bundle_dir) == []
+    responses = [e for e in bundle["events"] if e.kind == "message_accepted"
+                 and e.detail.get("kind") == "quote_response"]
+    assert [e.detail.get("request_id") for e in responses] == ["q-1"]
 
 
 SELLER_VARIANT = os.path.join(REPO_ROOT, "tests", "fixtures",
@@ -110,6 +113,7 @@ SELLER_VARIANT = os.path.join(REPO_ROOT, "tests", "fixtures",
 @pytest.mark.parametrize("profile_name, mode, expected_note", [
     ("quote-clean", "dupresp", "2 distinct quote responses"),
     ("quote-duplicate-delivery", "uuidresp", "2 distinct quote responses"),
+    ("quote-clean", "norequestid", "q-does-not-exist"),
 ])
 def test_fixture_seller_response_faults_fail_through_real_runner(
         tmp_path, profile_name, mode, expected_note):
@@ -125,6 +129,12 @@ def test_fixture_seller_response_faults_fail_through_real_runner(
     assert stage(result, "correct").status == "failed", detail
     assert result.verdict == "failed", detail
     assert verify_bundle(bundle_dir) == []
+    if mode == "norequestid":
+        responses = [e for e in load_bundle(bundle_dir)["events"]
+                     if e.kind == "message_accepted"
+                     and e.detail.get("kind") == "quote_response"]
+        assert [e.detail.get("request_id") for e in responses] == [
+            "q-does-not-exist"]
 
 
 def _spawn_environment_probe(tmp_path, inherit_env=False):

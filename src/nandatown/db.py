@@ -368,10 +368,16 @@ class TownDB:
                     (run_id, to, message_id,
                      "suppressed" if suppress_notify else "pending"),
                 )
+                detail = {"sender": sender, "to": to, "kind": kind,
+                          "content_fingerprint": content_fingerprint}
+                if "request_id" in body:
+                    # The request this message says it answers (the
+                    # quote.read skill: a quote_response carries the
+                    # request id), so correlation is judged from events
+                    # without exporting the body.
+                    detail["request_id"] = body["request_id"]
                 self._event(conn, run_id, now, "town", "message_accepted",
-                            message_id,
-                            {"sender": sender, "to": to, "kind": kind,
-                             "content_fingerprint": content_fingerprint})
+                            message_id, detail)
                 return now, False
         # Leave the transaction normally so rejection evidence commits.
         if reject:
