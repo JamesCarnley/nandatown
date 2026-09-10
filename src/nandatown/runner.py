@@ -548,7 +548,9 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
                         and _buyer_settled_response(events)):
                     break
             if grants:
-                refused_role = _grant_refused(get_events())
+                # Reuse this iteration's fetch when the buyer check made one.
+                refused_role = _grant_refused(
+                    events if buyer is None else get_events())
                 if refused_role:
                     post_event("runner", "harness_refused_grant",
                                refused_role,
