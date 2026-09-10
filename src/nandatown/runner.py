@@ -27,7 +27,7 @@ import httpx
 
 from . import __version__
 from .bundle import write_bundle
-from .evaluator import EVALUATOR_VERSION, evaluate
+from .evaluator import EVALUATOR_VERSION, RESPONSE_KIND, evaluate
 from .records import RunRecord, TestProfile, TownEvent, fingerprint
 from .profiles import PROFILES
 
@@ -382,6 +382,24 @@ def _quiescent(profile: TestProfile, events: list[dict[str, Any]]) -> bool:
     return bool(applied)
 
 
+def _buyer_settled_response(events: list[dict[str, Any]]) -> bool:
+    """Has the buyer acknowledged a quote response it was sent?
+
+    Any status except ``retryable`` settles the buyer's claim, so by then
+    the buyer has recorded whatever it will assert about the response.
+    An externally joined buyer has no process for the runner to watch;
+    this is how the runner knows that buyer is finished.
+    """
+    responses = {e["subject"] for e in events
+                 if e["kind"] == "message_accepted"
+                 and e["detail"].get("kind") == RESPONSE_KIND}
+    return any(e["kind"] == "ack_recorded"
+               and e["observer"] == "buyer"
+               and e["subject"] in responses
+               and e["detail"].get("status") != "retryable"
+               for e in events)
+
+
 def run_town(profile_name: str, out_dir: str, port: int = 0,
              model: str | None = None,
              external: dict[str, list[str] | None] | None = None,
@@ -522,8 +540,13 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
         while time.time() < deadline:
             if buyer is not None and buyer.poll() is not None:
                 break
-            if buyer is None and _quiescent(profile, get_events()):
-                break
+            if buyer is None:
+                # Seller-side completion is not the end of an external
+                # buyer's turn: it still has to claim and judge the reply.
+                events = get_events()
+                if (_quiescent(profile, events)
+                        and _buyer_settled_response(events)):
+                    break
             if grants:
                 refused_role = _grant_refused(get_events())
                 if refused_role:

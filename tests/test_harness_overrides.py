@@ -3,6 +3,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -152,6 +153,97 @@ def test_wait_handoff_records_external_participant_and_reconnect_rerun(
         "nandatown test-agent --profile quote-clean --role seller --wait")
     assert run.config["rerun_required_inputs"] == {
         "seller": "external participant must reconnect with fresh credentials"}
+
+
+# A town-joining buyer that deliberates before it acknowledges the quote
+# response. argv[1] is the think time in seconds; argv[2] is "assert" to
+# acknowledge with its correctness note, or "silent" to never acknowledge.
+DELIBERATE_BUYER = """\
+import os, sys, time
+from nandatown.client import TownClient
+
+think, mode = float(sys.argv[1]), sys.argv[2]
+client = TownClient(os.environ["TOWN_URL"], os.environ["RUN_ID"])
+client.join_auto(os.environ["NAME"], os.environ["TOKEN"], None)
+task = client.run_context["task"]
+seller = next(p["name"] for p in client.participants()
+              if "quote.read" in p["capabilities"])
+client.send(message_id="q-1", to=seller, kind="quote_request",
+            body={key: task[key]
+                  for key in ("sku", "quantity", "unit_price_cents")})
+claim, deadline = None, time.time() + 30
+while claim is None and time.time() < deadline:
+    client.notify(wait=0.2)
+    claim = client.claim()
+time.sleep(think)
+if mode == "assert":
+    total = claim["body"]["total_cents"]
+    client.ack(claim["message_id"], claim["fence"], "processed",
+               {"correct": total == task["expected_total_cents"],
+                "total_cents": total})
+"""
+
+
+def _run_with_buyer(tmp_path, connection, think, mode, wait_timeout):
+    """Run quote-clean with the deliberate buyer as the external subject,
+    joined through the --wait handoff or started as a --cmd command."""
+    script = tmp_path / "deliberate_buyer.py"
+    script.write_text(DELIBERATE_BUYER)
+    command = [sys.executable, str(script), str(think), mode]
+    processes: list[subprocess.Popen] = []
+
+    def connect(role, env):
+        assert role == "buyer"
+        processes.append(subprocess.Popen(
+            command, env={**os.environ, **env},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+
+    external = {"buyer": None if connection == "wait" else command}
+    try:
+        _, result = run_town("quote-clean", str(tmp_path / "runs"),
+                             external=external, wait_timeout=wait_timeout,
+                             on_credentials=connect)
+    finally:
+        for process in processes:
+            try:
+                # A silent buyer never finishes by itself.
+                process.wait(timeout=5 if mode == "assert" else 0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+    return result, processes
+
+
+@pytest.mark.parametrize("connection", ["wait", "cmd"])
+def test_external_buyer_is_judged_on_its_own_late_assertion(
+        tmp_path, connection):
+    # The stock seller acks within milliseconds; the buyer subject takes
+    # longer to check the quote. The run must stay open for its verdict.
+    result, processes = _run_with_buyer(tmp_path, connection, think=1.5,
+                                        mode="assert", wait_timeout=30)
+
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert result.verdict == "passed", detail
+    correct = next(s for s in result.stages if s.name == "correct")
+    assert correct.status == "passed", detail
+    if connection == "wait":
+        assert [p.returncode for p in processes] == [0]
+
+
+def test_external_buyer_that_never_asserts_is_incomplete_within_timeout(
+        tmp_path):
+    started = time.monotonic()
+    result, _ = _run_with_buyer(tmp_path, "wait", think=3600,
+                                mode="silent", wait_timeout=10)
+    elapsed = time.monotonic() - started
+
+    stages = {s.name: s for s in result.stages}
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert result.verdict == "incomplete", detail
+    assert stages["response"].status == "passed", detail
+    assert stages["correct"].status == "not_enough_evidence", detail
+    assert stages["correct"].note == "the buyer made no correctness assertion"
+    assert elapsed < 10 + 5
 
 
 def test_llm_harness_overrides_scripted_profile(tmp_path):
