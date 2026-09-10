@@ -167,6 +167,50 @@ def load_bundle(directory: str) -> dict[str, Any]:
     }
 
 
+class EvaluatorVersionDiffers(str):
+    """The verify_bundle problem for a bundle from another evaluator version.
+
+    Replay needs the evaluator version the bundle names, so a historical
+    bundle's recorded result is not reproduced; every other check still
+    runs. This is the one verify_bundle problem that is not an integrity
+    failure. It is a ``str`` carrying the unchanged message, so
+    verify_bundle's return contract is the same for every caller.
+    """
+
+    bundle_version: str
+    local_version: str
+
+    def __new__(cls, bundle_version: str,
+                local_version: str) -> EvaluatorVersionDiffers:
+        problem = super().__new__(
+            cls, f"evaluator version differs: bundle {bundle_version},"
+                 f" local {local_version}; reproducibility not checked")
+        problem.bundle_version = bundle_version
+        problem.local_version = local_version
+        return problem
+
+    def __getnewargs__(self) -> tuple[str, str]:
+        return self.bundle_version, self.local_version
+
+
+def verify_bundle_integrity(
+        directory: str) -> tuple[list[str], EvaluatorVersionDiffers | None]:
+    """verify_bundle, split for callers that accept historical bundles.
+
+    Returns every integrity problem (records, hashes, manifest,
+    cross-record bindings, unsupported evaluator, replay mismatch under the
+    local evaluator, attestation) and, separately, the evaluator version
+    difference that left replay unchecked, if any."""
+    integrity: list[str] = []
+    differs: EvaluatorVersionDiffers | None = None
+    for problem in verify_bundle(directory):
+        if isinstance(problem, EvaluatorVersionDiffers):
+            differs = problem
+        else:
+            integrity.append(problem)
+    return integrity, differs
+
+
 def verify_bundle(directory: str) -> list[str]:
     """Check integrity and evaluator reproducibility. Returns problems."""
     problems: list[str] = []
@@ -303,9 +347,8 @@ def verify_bundle(directory: str) -> list[str]:
         problems.append(str(exc))
     if expected_version is not None \
             and recorded.evaluator_version != expected_version:
-        problems.append(
-            f"evaluator version differs: bundle {recorded.evaluator_version},"
-            f" local {expected_version}; reproducibility not checked")
+        problems.append(EvaluatorVersionDiffers(
+            recorded.evaluator_version, expected_version))
     elif replay_fn is not None and records_coherent:
         try:
             replay = replay_fn(

@@ -235,6 +235,25 @@ def _bundle_receipt_fields(bundle: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def bundle_receipt_check(bundle_dir: str) -> tuple[list[str], str | None]:
+    """Whether a receipt may rest on this bundle.
+
+    Returns the bundle's integrity problems, any one of which refuses a
+    receipt, and a disclosure for a historical bundle recorded by another
+    evaluator version: its hashes, manifest, bindings and attestation were
+    verified, but its recorded result was not replayed."""
+    from .bundle import verify_bundle_integrity
+
+    problems, differs = verify_bundle_integrity(bundle_dir)
+    disclosure = None
+    if differs is not None:
+        disclosure = (
+            f"evaluator replay not checked: bundle {differs.bundle_version},"
+            f" local {differs.local_version}; the recorded result was not"
+            " reproduced")
+    return problems, disclosure
+
+
 def make_receipt(bundle_dir: str, keystore=None,
                  signer: str | None = None,
                  limitations: list[str] | None = None) -> str:
@@ -249,6 +268,10 @@ def make_receipt(bundle_dir: str, keystore=None,
     path_problem = _receipt_file_problem(path, missing_ok=True)
     if path_problem:
         raise ValueError(f"refusing to write receipt: {path_problem}")
+    bundle_problems, _ = bundle_receipt_check(bundle_dir)
+    if bundle_problems:
+        raise ValueError("refusing to write receipt: the bundle does not"
+                         " verify: " + "; ".join(bundle_problems))
 
     bundle = load_bundle(bundle_dir)
     fields = _bundle_receipt_fields(bundle)
@@ -276,7 +299,9 @@ def make_receipt(bundle_dir: str, keystore=None,
 def verify_receipt(receipt_path: str,
                    bundle_dir: str | None = None) -> list[str]:
     """Offline verification. Returns problems; empty means the receipt
-    verifies (which still proves commitment, not truth)."""
+    verifies (which still proves commitment, not truth). With a bundle,
+    the bundle must also pass bundle_receipt_check and match every
+    receipt claim."""
     from .identity_portable import verify_signature
 
     problems: list[str] = []
@@ -305,6 +330,11 @@ def verify_receipt(receipt_path: str,
     if bundle_dir:
         from .bundle import load_bundle
 
+        bundle_problems, _ = bundle_receipt_check(bundle_dir)
+        if bundle_problems:
+            problems.extend(f"bundle does not verify: {problem}"
+                            for problem in bundle_problems)
+            return problems
         try:
             bundle = load_bundle(bundle_dir)
         except (OSError, json.JSONDecodeError, KeyError, TypeError,

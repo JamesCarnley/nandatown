@@ -391,24 +391,40 @@ def cmd_compare(args: argparse.Namespace) -> int:
 
 
 def cmd_receipt(args: argparse.Namespace) -> int:
-    from .receipt import make_receipt
+    from .receipt import bundle_receipt_check, make_receipt
 
-    path = make_receipt(args.bundle_dir)
+    problems, disclosure = bundle_receipt_check(args.bundle_dir)
+    if problems:
+        print("receipt refused: the bundle does not verify")
+        for p in problems:
+            print(f"problem: {p}")
+        return 1
+    try:
+        path = make_receipt(args.bundle_dir)
+    except ValueError as exc:
+        print(f"receipt refused: {exc}")
+        return 1
     print(f"receipt written to {path}")
     print("sanitized and signed: the claim, digests, observer, window,"
           " coverage, and limitations; nothing private leaves the"
           " bundle")
+    if disclosure:
+        print(disclosure)
     return 0
 
 
 def cmd_verify_receipt(args: argparse.Namespace) -> int:
-    from .receipt import verify_receipt
+    from .receipt import bundle_receipt_check, verify_receipt
 
     problems = verify_receipt(args.receipt, bundle_dir=args.bundle)
     if not problems:
         print("receipt verifies: the named key committed to these exact"
               " bytes" + (" and the bundle matches" if args.bundle
                           else ""))
+        if args.bundle:
+            _, disclosure = bundle_receipt_check(args.bundle)
+            if disclosure:
+                print(disclosure)
         print("commitment is not truth, independence, or safety")
         return 0
     for p in problems:

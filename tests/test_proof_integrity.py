@@ -92,12 +92,14 @@ def test_proof_requires_evaluator_replay_not_just_valid_signatures(tmp_path):
     manifest["bundle_fingerprint"] = fingerprint(manifest["files"])
     manifest_path.write_text(json.dumps(manifest))
     # Valid signatures commit to these bytes; they do not make the
-    # recorded passing verdict agree with the changed observations.
+    # recorded passing verdict agree with the changed observations, so
+    # no receipt is issued over them either.
     attest_bundle(str(directory))
-    path = make_receipt(str(directory))
-    assert verify_receipt(path, str(directory)) == []
     assert any("evaluator replay mismatch" in problem
                for problem in verify_bundle(str(directory)))
+    with pytest.raises(ValueError, match="evaluator replay mismatch"):
+        make_receipt(str(directory))
+    assert not (directory / "receipt.json").exists()
 
     ok, text = render_proof(str(directory))
 
