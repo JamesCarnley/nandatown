@@ -213,6 +213,11 @@ def run_path_test(subject_url: str | None, out_dir: str,
         artifact_text, artifact_texts, fetch_card, send_message,
     )
 
+    if subject_url and index_file:
+        # The index entry chooses the endpoint; the evidence must not name
+        # a different URL as the subject.
+        raise ValueError("give either a subject URL or an index file, not"
+                         " both")
     profile = get_path_profile(profile_ref or DEFAULT_PATH_PROFILE)
     strict_semantics = _strict_path_semantics(profile)
     run_id = "path-" + uuid.uuid4().hex[:12]

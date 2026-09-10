@@ -376,3 +376,38 @@ def test_generated_rerun_keeps_explicit_path_profile_when_default_changes(
     finally:
         process.terminate()
         process.wait()
+
+
+def _write_index(path, url=SUBJECT):
+    path.write_text(json.dumps({"agents": {"seller": {"url": url}}}))
+    return str(path)
+
+
+def test_url_and_index_together_are_refused_before_any_contact(
+        tmp_path, capsys):
+    """Catches a pass credited to --url while --index chose the agent."""
+    from nandatown.cli import main
+
+    index = _write_index(tmp_path / "index.json", "http://127.0.0.1:9")
+    out = tmp_path / "runs"
+
+    assert main(["test-agent", "--url", "http://127.0.0.1:9",
+                 "--index", index, "--agent-name", "seller",
+                 "--out", str(out)]) == 2
+    assert "either --url or --index" in capsys.readouterr().out
+    assert not out.exists()
+    with pytest.raises(ValueError, match="either a subject URL or an index"):
+        run_path_test("http://127.0.0.1:9", str(out), index_file=index,
+                      agent_name="seller")
+    assert not out.exists()
+
+
+def test_index_without_agent_name_is_refused(tmp_path, capsys):
+    from nandatown.cli import main
+
+    index = _write_index(tmp_path / "index.json")
+    out = tmp_path / "runs"
+
+    assert main(["test-agent", "--index", index, "--out", str(out)]) == 2
+    assert "--agent-name" in capsys.readouterr().out
+    assert not out.exists()
