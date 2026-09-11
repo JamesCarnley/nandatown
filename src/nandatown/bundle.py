@@ -66,6 +66,15 @@ def _duplicates(values: list[str]) -> list[str]:
     return sorted(repeated)
 
 
+def _jsonl_records(text: str) -> list[str]:
+    """Split JSON Lines at LF only.
+
+    str.splitlines() also breaks at U+2028, U+2029 and U+0085, which JSON
+    allows unescaped inside strings, and would cut one record in two.
+    Text-mode reads have already turned CRLF into LF."""
+    return [line for line in text.split("\n") if line]
+
+
 def write_bundle(directory: str, profile, run: RunRecord,
                  intents: list[dict[str, Any]], events: list[TownEvent],
                  result: EvidenceResult, mode: str = "track") -> dict[str, Any]:
@@ -159,9 +168,9 @@ def load_bundle(directory: str) -> dict[str, Any]:
         "profile": profile,
         "run": RunRecord.model_validate_json(read("run.json")),
         "intents": [Intent.model_validate_json(line)
-                    for line in read("intents.jsonl").splitlines() if line],
+                    for line in _jsonl_records(read("intents.jsonl"))],
         "events": [TownEvent.model_validate_json(line)
-                   for line in read("events.jsonl").splitlines() if line],
+                   for line in _jsonl_records(read("events.jsonl"))],
         "result": EvidenceResult.model_validate_json(read("result.json")),
         "manifest": manifest,
     }
