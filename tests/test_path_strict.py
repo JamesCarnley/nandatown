@@ -10,7 +10,7 @@ import pytest
 import nandatown.path_profiles as path_profiles
 from nandatown.a2a_adapter import build_agent_card
 from nandatown.bundle import load_bundle, verify_bundle
-from nandatown.records import fingerprint
+from nandatown.records import canonical_json, fingerprint
 from nandatown.path_runner import path_evaluator_version, run_path_test
 
 
@@ -549,9 +549,10 @@ def _marker(depth):
             "fingerprint": fingerprint(_nested_array(depth))}
 
 
-def _run_echo(tmp_path, profile_ref, echo, depth):
+def _run_echo(tmp_path, profile_ref, echo, depth=None, raw=None):
     kind, key, shape = TASK_AND_CARD_ECHOES[echo]
-    directory, result = _run(tmp_path, profile_ref, **shape(_deep(depth)))
+    directory, result = _run(tmp_path, profile_ref,
+                             **shape(_deep(depth) if raw is None else raw))
     events = load_bundle(directory)["events"]
     assert "town_driver_error" not in [event.kind for event in events]
     recorded = [event.detail[key] for event in events
@@ -636,4 +637,207 @@ def test_strict_malformed_status_is_subject_failure_not_town_error(tmp_path):
     bundle = load_bundle(directory)
     assert not any(event.kind == "town_driver_error"
                    for event in bundle["events"])
+    assert verify_bundle(directory) == []
+
+
+# Python's json decodes NaN, Infinity and -Infinity, but pydantic writes a
+# non-finite float as null, so replay judged a different value than the
+# run did. A lone surrogate has no UTF-8 encoding, so writing it crashed.
+NON_FINITE = [pytest.param("NaN", id="nan"),
+              pytest.param("Infinity", id="infinity"),
+              pytest.param("-Infinity", id="-infinity")]
+UNENCODABLE = [
+    pytest.param('"\\ud800"', "string", id="lone-high-surrogate"),
+    pytest.param('"ok\\udfff"', "string", id="lone-low-surrogate"),
+    pytest.param('{"\\ud800": 1}', "object", id="surrogate-key"),
+    pytest.param('[{"a": ["\\udc00"]}]', "array", id="nested-surrogate"),
+    pytest.param('[NaN, "\\ud800"]', "array", id="surrogate-and-nan"),
+]
+TASK_ECHOES = ["task_id", "task_kind", "task_state"]
+
+
+def _non_finite_marker(raw):
+    # Canonical JSON spells a bare non-finite number exactly as sent.
+    return {"unrecorded": "non-finite number", "type": "number",
+            "json_length": len(raw),
+            "fingerprint": "sha256:" + hashlib.sha256(raw.encode()).hexdigest()}
+
+
+def _unencodable_marker(json_type):
+    return {"unrecorded": "unencodable string", "type": json_type}
+
+
+def _statuses(result):
+    return [(stage.name, stage.status) for stage in result.stages]
+
+
+@pytest.mark.parametrize("raw", NON_FINITE)
+@pytest.mark.parametrize("echo", list(TASK_AND_CARD_ECHOES))
+@pytest.mark.parametrize("profile_ref", ECHO_PROFILES)
+def test_non_finite_task_or_card_value_is_recorded_as_marker(
+        tmp_path, profile_ref, echo, raw):
+    """The marker is judged as any unusual value in that field would be."""
+    unusual, _ = _run_echo(tmp_path / "unusual", profile_ref, echo, 64)
+    result, recorded = _run_echo(tmp_path / "marker", profile_ref, echo,
+                                 raw=raw)
+
+    assert recorded == [_non_finite_marker(raw)] * len(recorded)
+    assert _statuses(result) == _statuses(unusual)
+    assert result.verdict == unusual.verdict
+    assert result.verdict != "error"
+
+
+@pytest.mark.parametrize("raw", NON_FINITE)
+@pytest.mark.parametrize("profile_ref", ECHO_PROFILES)
+def test_non_finite_task_kind_fails_invocation_as_the_subjects(
+        tmp_path, profile_ref, raw):
+    result, _ = _run_echo(tmp_path, profile_ref, "task_kind", raw=raw)
+
+    invocation = _stage(result, "protocol_invocation")
+    assert invocation.status == "failed"
+    assert invocation.note == "the response was not a well-formed task"
+    assert result.verdict == "failed"
+
+
+@pytest.mark.parametrize("raw", NON_FINITE)
+@pytest.mark.parametrize("profile_ref", [STRICT_PRICE_PROFILE,
+                                         STRICT_QUOTE_PROFILE])
+def test_non_finite_task_state_fails_strict_invocation(tmp_path, profile_ref,
+                                                      raw):
+    result, _ = _run_echo(tmp_path, profile_ref, "task_state", raw=raw)
+
+    invocation = _stage(result, "protocol_invocation")
+    assert invocation.status == "failed"
+    assert invocation.note.startswith(
+        "expected successful terminal task state 'completed', observed"
+        " {'unrecorded': 'non-finite number'")
+    assert _stage(result, "semantic_result").status == "not_tested"
+    assert result.verdict == "failed"
+
+
+@pytest.mark.parametrize("raw", NON_FINITE + [
+    pytest.param('"\\ud800"', id="lone-surrogate")])
+@pytest.mark.parametrize("profile_ref", [LEGACY_PRICE_PROFILE,
+                                         LEGACY_QUOTE_PROFILE])
+def test_legacy_marker_state_is_judged_like_any_unusual_state(
+        tmp_path, profile_ref, raw):
+    """Legacy profiles accept any non-empty state; the marker is one.
+
+    A NaN state already passed when run (NaN is truthy) but was written as
+    null, which fails, so the bundle did not verify.
+    """
+    _, banana = _run(tmp_path / "banana", profile_ref, state="banana")
+    result, recorded = _run_echo(tmp_path / "marker", profile_ref,
+                                 "task_state", raw=raw)
+
+    assert recorded[0]["unrecorded"] in ("non-finite number",
+                                         "unencodable string")
+    assert _stage(result, "protocol_invocation").status == "passed"
+    assert _statuses(result) == _statuses(banana)
+    assert result.verdict == banana.verdict == "passed"
+
+
+@pytest.mark.parametrize("raw", NON_FINITE)
+@pytest.mark.parametrize("profile_ref, field", ECHOED_FIELDS)
+def test_non_finite_fulfillment_field_is_recorded_as_marker_and_fails(
+        tmp_path, profile_ref, field, raw):
+    directory, result = _run(tmp_path, profile_ref, raw_fields={field: raw})
+
+    assert _stage(result, "protocol_invocation").status == "passed"
+    assert _stage(result, "semantic_result").status == "failed"
+    assert result.verdict == "failed"
+    events = load_bundle(directory)["events"]
+    kinds = [event.kind for event in events]
+    assert "town_driver_error" not in kinds
+    assert "fulfillment_unparseable" not in kinds
+    observed = [event for event in events
+                if event.kind == "fulfillment_observed"]
+    assert observed
+    assert all(_echoed_value(event, field) == _non_finite_marker(raw)
+               for event in observed)
+    assert verify_bundle(directory) == []
+    assert (Path(directory) / "attestation.json").is_file()
+
+
+@pytest.mark.parametrize("raw, json_type", [
+    pytest.param("[1, NaN]", "array", id="in-array"),
+    pytest.param('{"a": {"b": -Infinity}}', "object", id="in-object"),
+    pytest.param("1e400", "number", id="overflowing-literal"),
+])
+@pytest.mark.parametrize("profile_ref", ECHO_PROFILES)
+def test_value_containing_a_non_finite_number_is_recorded_as_marker(
+        tmp_path, profile_ref, raw, json_type):
+    value = json.loads(raw)
+    unusual, _ = _run_echo(tmp_path / "unusual", profile_ref, "task_id", 64)
+    result, recorded = _run_echo(tmp_path / "marker", profile_ref, "task_id",
+                                 raw=raw)
+
+    assert recorded == [{"unrecorded": "non-finite number",
+                         "type": json_type,
+                         "json_length": len(canonical_json(value)),
+                         "fingerprint": fingerprint(value)}] * len(recorded)
+    assert _statuses(result) == _statuses(unusual)
+
+
+@pytest.mark.parametrize("raw, json_type", UNENCODABLE)
+@pytest.mark.parametrize("echo", TASK_ECHOES)
+@pytest.mark.parametrize("profile_ref", ECHO_PROFILES)
+def test_unencodable_task_value_is_recorded_as_marker(
+        tmp_path, profile_ref, echo, raw, json_type):
+    """A string or key with no UTF-8 encoding must not crash the run.
+
+    Card fields never reach the echo with one: the card digest refuses
+    the whole card first, failing card retrieval as before.
+    """
+    unusual, _ = _run_echo(tmp_path / "unusual", profile_ref, echo, 64)
+    result, recorded = _run_echo(tmp_path / "marker", profile_ref, echo,
+                                 raw=raw)
+
+    assert recorded == [_unencodable_marker(json_type)] * len(recorded)
+    assert _statuses(result) == _statuses(unusual)
+    assert result.verdict == unusual.verdict
+    assert result.verdict != "error"
+
+
+@pytest.mark.parametrize("echo", TASK_ECHOES)
+@pytest.mark.parametrize("profile_ref", ECHO_PROFILES)
+def test_deeply_nested_unencodable_value_keeps_marker_without_digest(
+        tmp_path, profile_ref, echo):
+    """Like a shallow one, not a failed exchange for a successful call."""
+    unusual, _ = _run_echo(tmp_path / "unusual", profile_ref, echo, 64)
+    result, recorded = _run_echo(tmp_path / "marker", profile_ref, echo,
+                                 raw="[" * 70 + '"\\ud800"' + "]" * 70)
+
+    assert recorded == [{"unrecorded": "nesting too deep",
+                         "type": "array"}] * len(recorded)
+    assert _statuses(result) == _statuses(unusual)
+
+
+def _text_artifacts(text):
+    return ('[{"artifactId": "quote", "parts": [{"kind": "text", "text": '
+            + json.dumps(text) + "}]}]")
+
+
+@pytest.mark.parametrize("profile_ref, text", [
+    *[pytest.param(ref, "\ud800 is not JSON", id=f"{ref}-not-json")
+      for ref in ECHO_PROFILES],
+    *[pytest.param(ref, '{"total_cents": 3990, "note": "\ud800"}',
+                   id=f"{ref}-undigestable")
+      for ref in (STRICT_PRICE_PROFILE, STRICT_QUOTE_PROFILE)],
+])
+def test_unparseable_output_preview_with_a_lone_surrogate_is_a_marker(
+        tmp_path, profile_ref, text):
+    directory, result = _run(tmp_path, profile_ref, raw_task_fields={
+        "artifacts": _text_artifacts(text)})
+
+    assert _stage(result, "protocol_invocation").status == "passed"
+    semantic = _stage(result, "semantic_result")
+    assert semantic.status == "failed"
+    assert semantic.note == "the fulfillment artifact is not parseable"
+    assert result.verdict == "failed"
+    unparseable = [event for event in load_bundle(directory)["events"]
+                   if event.kind == "fulfillment_unparseable"]
+    assert unparseable
+    assert all(event.detail["text"] == _unencodable_marker("string")
+               for event in unparseable)
     assert verify_bundle(directory) == []

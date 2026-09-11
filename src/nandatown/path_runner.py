@@ -16,6 +16,7 @@ to the subject.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -111,26 +112,85 @@ def _nesting_exceeds(value: Any, limit: int) -> bool:
     return False
 
 
-def _echoed(value: Any) -> Any:
-    """A subject value as recorded in evidence: verbatim within the bound.
-
-    A deeper value becomes a marker instead of crashing the bundle write.
-    Like the value, the marker is truthy and never equals anything a stage
-    expects (a task kind, a terminal state, a quote term), so the recorded
-    evidence evaluates as the value would have. The card digest and the
-    fulfillment's content_digest still cover the full value.
-    """
-    if not _nesting_exceeds(value, MAX_ECHOED_NESTING):
-        return value
-    marker = {"unrecorded": "nesting too deep",
-              "type": "object" if isinstance(value, dict) else "array"}
+def _utf8_encodable(text: str) -> bool:
     try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _unwritable(value: Any) -> str | None:
+    """Why a value within the nesting bound cannot be written verbatim.
+
+    Python's json decodes NaN, Infinity and -Infinity, which pydantic
+    writes as null, so replay would judge a different value than the run
+    did; and it cannot write a string or key holding a lone surrogate at
+    all. An unencodable string outranks a non-finite number, as it leaves
+    nothing to digest. Walks without recursing.
+    """
+    non_finite = False
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if isinstance(key, str) and not _utf8_encodable(key):
+                    return "unencodable string"
+                stack.append(child)
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, str):
+            if not _utf8_encodable(item):
+                return "unencodable string"
+        elif isinstance(item, float) and not math.isfinite(item):
+            non_finite = True
+    return "non-finite number" if non_finite else None
+
+
+def _json_type(value: Any) -> str:
+    # Markers are only made for containers, strings and floats.
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    return "string" if isinstance(value, str) else "number"
+
+
+def _echoed(value: Any) -> Any:
+    """A subject value as recorded in evidence: verbatim when writable.
+
+    A value nested deeper than the bound, or holding a lone surrogate or a
+    non-finite number, becomes a marker instead of crashing the bundle
+    write or being rewritten by it. Like the value, the marker is truthy
+    and never equals anything a stage expects (a task kind, a terminal
+    state, a quote term), so the recorded evidence evaluates as the value
+    would have. The card digest and the fulfillment's content_digest still
+    cover the full value.
+    """
+    if _nesting_exceeds(value, MAX_ECHOED_NESTING):
+        reason = "nesting too deep"
+    else:
+        reason = _unwritable(value)
+        if reason is None:
+            return value
+    marker = {"unrecorded": reason, "type": _json_type(value)}
+    if reason == "unencodable string":
+        # No UTF-8 encoding exists to measure or digest.
+        return marker
+    try:
+        # Canonical JSON spells non-finite numbers NaN, Infinity and
+        # -Infinity, as in the card digest and content_digest.
         marker["json_length"] = len(canonical_json(value))
         marker["fingerprint"] = fingerprint(value)
-    except RecursionError:
+    except (RecursionError, UnicodeEncodeError):
         # Decoded just under the interpreter limit, re-serializing can need
-        # one frame more. The output is still the subject's, not a Town
-        # error: keep the marker without its digest.
+        # one frame more, and a lone surrogate nested past the bound has no
+        # UTF-8 encoding. The output is still the subject's, not a Town
+        # error: keep the marker without its digest. Frame use differs
+        # between Python versions, so for the same input the digest may be
+        # present on one and absent on another; replay reads the recorded
+        # marker either way.
         marker.pop("json_length", None)
     return marker
 
@@ -373,7 +433,7 @@ def run_path_test(subject_url: str | None, out_dir: str,
                         recorder.emit("town-requester",
                                       "fulfillment_unparseable", order_id,
                                       {"attempt": attempt,
-                                       "text": preview})
+                                       "text": _echoed(preview)})
                         if strict_semantics:
                             break
                         continue
