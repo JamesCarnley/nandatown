@@ -1,4 +1,5 @@
 import threading
+import time
 
 import httpx
 from fastapi.testclient import TestClient
@@ -83,14 +84,23 @@ def test_buyer_and_seller_complete_clean_run(tmp_path):
                      deadline_seconds=10.0)
     assert code == buyer.EXIT_CORRECT
 
-    events = admin.get(f"/runs/{run_id}/events", headers=ADMIN).json()["events"]
+    # The seller sends its response before acknowledging the request, so the
+    # buyer can return first; wait, bounded, for the seller thread's ack.
+    deadline = time.monotonic() + 5.0
+    while True:
+        events = admin.get(f"/runs/{run_id}/events",
+                           headers=ADMIN).json()["events"]
+        seller_acks = [e for e in events
+                       if e["kind"] == "ack_recorded"
+                       and e["observer"] == "seller"
+                       and e["detail"]["note"].get("applied")]
+        if seller_acks or time.monotonic() > deadline:
+            break
+        time.sleep(0.05)
     buyer_acks = [e for e in events
                   if e["kind"] == "ack_recorded" and e["observer"] == "buyer"]
     assert buyer_acks, events
     note = buyer_acks[-1]["detail"]["note"]
     assert note["correct"] is True
     assert note["total_cents"] == 3990
-    seller_acks = [e for e in events
-                   if e["kind"] == "ack_recorded" and e["observer"] == "seller"
-                   and e["detail"]["note"].get("applied")]
-    assert len(seller_acks) == 1
+    assert len(seller_acks) == 1, events
