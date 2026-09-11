@@ -246,6 +246,108 @@ def test_external_buyer_that_never_asserts_is_incomplete_within_timeout(
     assert elapsed < 10 + 5
 
 
+# A seller subject that serves exactly one request and exits 0. With
+# argv[1] "respond" it sends the quote response and acknowledges the
+# request first; with "silent" it claims the request and leaves.
+ONE_SHOT_SELLER = """\
+import os, sys, time
+from nandatown.client import TownClient
+
+client = TownClient(os.environ["TOWN_URL"], os.environ["RUN_ID"])
+client.join_auto(os.environ["NAME"], os.environ["TOKEN"], None)
+claim, deadline = None, time.time() + 30
+while claim is None and time.time() < deadline:
+    client.notify(wait=0.2)
+    claim = client.claim()
+if claim is not None and sys.argv[1] == "respond":
+    body = claim["body"]
+    total = body["quantity"] * body["unit_price_cents"]
+    client.send(message_id="r-1", to=claim["from"], kind="quote_response",
+                body={"request_id": claim["message_id"],
+                      "total_cents": total})
+    client.ack(claim["message_id"], claim["fence"], "processed",
+               {"applied": True, "total_cents": total})
+"""
+
+# The stock buyer on a slow host: each claim starts a second late, so the
+# buyer is still on its way to the reply when a quick seller exits.
+SLOW_STOCK_BUYER = """\
+import time
+from nandatown.client import TownClient
+from nandatown.participants import buyer
+
+claim = TownClient.claim
+TownClient.claim = lambda self: (time.sleep(1.0), claim(self))[1]
+buyer.main()
+"""
+
+
+@pytest.fixture
+def slow_stock_buyer(monkeypatch):
+    spawn = runner_module._spawn_participant
+
+    def spawn_slow_buyer(command, url, run_id, name, *args, **kwargs):
+        if name == "buyer":
+            assert command == [sys.executable, "-m",
+                               "nandatown.participants.buyer"]
+            command = [sys.executable, "-c", SLOW_STOCK_BUYER]
+        return spawn(command, url, run_id, name, *args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "_spawn_participant", spawn_slow_buyer)
+
+
+def _test_one_shot_seller(tmp_path, capsys, mode):
+    script = tmp_path / "one_shot_seller.py"
+    script.write_text(ONE_SHOT_SELLER)
+    command = " ".join(shlex.quote(part)
+                       for part in [sys.executable, str(script), mode])
+    started = time.monotonic()
+    code = main(["test-agent", "--role", "seller", "--cmd", command,
+                 "--out", str(tmp_path / "runs")])
+    elapsed = time.monotonic() - started
+    out = capsys.readouterr().out
+    bundle_dir = out.rsplit("Evidence bundle: ", 1)[1].strip()
+    bundle = load_bundle(bundle_dir)
+    return code, bundle["result"], bundle["events"], elapsed
+
+
+def test_one_shot_seller_is_judged_after_the_stock_buyer_claims(
+        tmp_path, capsys, slow_stock_buyer):
+    # The subject answered, acknowledged and exited 0: its job is done.
+    # Town's own buyer still has to claim and check the reply, and must not
+    # be stopped on the way because the seller left first.
+    code, result, events, _ = _test_one_shot_seller(tmp_path, capsys,
+                                                    "respond")
+
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert (code, result.verdict) == (0, "passed"), detail
+    seller_exit = next(e for e in events if e.kind == "participant_exited"
+                       and e.subject == "seller")
+    buyer_claim = next(e for e in events if e.kind == "message_claimed"
+                       and e.subject == "r-1")
+    buyer_exit = next(e for e in events if e.kind == "participant_exited"
+                      and e.subject == "buyer")
+    assert seller_exit.detail == {"exit_code": 0}
+    assert seller_exit.at < buyer_claim.at  # the race this guards
+    assert buyer_exit.detail == {"exit_code": 0}  # finished on its own
+
+
+def test_seller_that_exits_without_responding_still_ends_the_run(
+        tmp_path, capsys):
+    code, result, events, elapsed = _test_one_shot_seller(
+        tmp_path, capsys, "silent")
+
+    stages = {s.name: s for s in result.stages}
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert (code, result.verdict) == (1, "incomplete"), detail
+    assert stages["response"].status == "not_enough_evidence", detail
+    assert any(e.kind == "participant_exited" and e.subject == "seller"
+               and e.detail == {"exit_code": 0} for e in events)
+    # Ended by the seller's exit (plus the settle wait), not by the
+    # stock buyer's 45 s deadline or the 60 s timeout.
+    assert elapsed < 30
+
+
 def test_llm_harness_overrides_scripted_profile(tmp_path):
     bundle_dir, result = run_town("quote-clean", str(tmp_path),
                                   harnesses={"seller": "llm:mock:alt"})

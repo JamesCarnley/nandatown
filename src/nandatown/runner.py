@@ -400,6 +400,18 @@ def _buyer_settled_response(events: list[dict[str, Any]]) -> bool:
                for e in events)
 
 
+def _response_accepted(events: list[dict[str, Any]]) -> bool:
+    """Has the town accepted a quote response for the buyer?
+
+    From then on the response waits in the buyer's inbox: a seller that
+    exits has finished its part, and claiming and judging the response
+    is the buyer's.
+    """
+    return any(e["kind"] == "message_accepted"
+               and e["detail"].get("kind") == RESPONSE_KIND
+               for e in events)
+
+
 def run_town(profile_name: str, out_dir: str, port: int = 0,
              model: str | None = None,
              external: dict[str, list[str] | None] | None = None,
@@ -535,6 +547,7 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
             procs.append(buyer)
 
         restarted = False
+        seller_done = False
         refused_role: str | None = None
         deadline = time.time() + wait_timeout
         while time.time() < deadline:
@@ -559,7 +572,7 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
                                           " this harness must present"
                                           " TOWN_GRANT"})
                     break
-            if seller is not None:
+            if seller is not None and not seller_done:
                 rc = seller.poll()
                 if rc is not None:
                     _stop_process(seller)
@@ -573,7 +586,15 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
                     else:
                         post_event("runner", "participant_exited",
                                    "seller", {"exit_code": rc})
-                        break
+                        if buyer is None or not _response_accepted(
+                                get_events()):
+                            break
+                        # The seller left after its quote response was
+                        # accepted, so its part is over, but the buyer
+                        # process still has to claim and judge that
+                        # response. Let the buyer finish and exit on its
+                        # own, within the same deadline.
+                        seller_done = True
             time.sleep(0.1)
         if buyer is not None:
             buyer_exit = _stop_process(buyer)
