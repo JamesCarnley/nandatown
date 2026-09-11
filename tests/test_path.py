@@ -333,10 +333,19 @@ UNUSABLE_URLS = [
     pytest.param("http://", id="no-host"),
     pytest.param("http://[::1", id="unparseable"),
     pytest.param("http://" + "a" * 1_000_000, id="one-megabyte"),
+    pytest.param("\t\n", id="whitespace-only"),
+    pytest.param("http://127.0.0.1:99999", id="port-99999"),
+    pytest.param("http://127.0.0.1:65536", id="port-65536"),
+    pytest.param("http://127.0.0.1:0", id="port-zero"),
+    pytest.param("http://127.0.0.1:-1", id="port-negative"),
+    pytest.param("http://[::1]:99999", id="ipv6-port-99999"),
+    pytest.param("https://agent.example:" + "9" * 30, id="port-30-digits"),
 ]
 USABLE_URLS = ["http://10.0.0.5:8940", "https://agent.example",
                "http://127.0.0.1:9", "http://[::1]:8940",
-               "https://agent.example:8443/a2a/"]
+               "https://agent.example:8443/a2a/", "http://127.0.0.1:1",
+               "http://127.0.0.1:65535", "http://[::1]:65535",
+               "http://127.0.0.1:"]
 
 
 def _assert_resolution_refused(bundle_dir, result, reason, problems=()):
@@ -357,12 +366,7 @@ def test_unusable_url_fails_resolution_not_card_retrieval(tmp_path, url):
     bundle_dir, result = run_path_test(url, str(tmp_path / "runs"),
                                        http=client())
 
-    # A blank --url is also recorded as the run's participant name, which
-    # verify rejects on its own; that run record is outside resolution.
-    problems = ([] if url.strip()
-                else ["run participant 1 has no valid name"])
-    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON,
-                               problems)
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
 
 
 @pytest.mark.parametrize("url", UNUSABLE_URLS)
@@ -407,6 +411,101 @@ def test_any_absolute_http_url_passes_resolution(tmp_path, url, via):
 
     assert stage(result, "resolution").status == "passed"
     assert stage(result, "agent_card_retrieval").status == "passed"
+
+
+@pytest.mark.parametrize("url", [
+    pytest.param("http://127.0.0.1:99999", id="port-99999"),
+    pytest.param("http://127.0.0.1:0", id="port-zero"),
+])
+def test_out_of_range_port_is_not_charged_to_card_retrieval(tmp_path, url):
+    """Without an injected client these failed as the agent's card fetch."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"))
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+
+
+def _assert_verifiable_with_receipt(bundle_dir, tmp_path):
+    from nandatown.identity_portable import Keystore
+    from nandatown.receipt import make_receipt
+
+    assert verify_bundle(bundle_dir) == []
+    receipt = json.loads(open(make_receipt(
+        bundle_dir, keystore=Keystore(str(tmp_path / "keys")))).read())
+    assert receipt["payload"]["claim"]["subject"].strip()
+
+
+@pytest.mark.parametrize("url", ["", "   ", "\t\n"])
+def test_blank_url_writes_a_bundle_that_verifies(tmp_path, url):
+    """A blank locator must not become the recorded subject name."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"),
+                                       http=client())
+
+    assert stage(result, "resolution").status == "failed"
+    run = load_bundle(bundle_dir)["run"]
+    assert run.participants[1] == {"name": "?", "role": "subject"}
+    assert run.config["subject"] in (None, "")
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+@pytest.mark.parametrize("listed", [True, False], ids=["listed", "unlisted"])
+@pytest.mark.parametrize("agent_name", ["   ", "\t"])
+def test_blank_agent_name_writes_a_bundle_that_verifies(tmp_path, agent_name,
+                                                        listed):
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {
+        (agent_name if listed else "maya-seller"): {"url": SUBJECT}}}))
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name=agent_name, http=client())
+
+    assert stage(result, "resolution").status == (
+        "passed" if listed else "failed")
+    assert load_bundle(bundle_dir)["run"].participants[1]["name"] == "?"
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+def test_subject_names_are_recorded_unchanged(tmp_path):
+    """Pins run records Town already wrote with a usable locator."""
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": SUBJECT}}}))
+    runs = str(tmp_path / "runs")
+    cases = [
+        ((SUBJECT, None, None), SUBJECT, SUBJECT),
+        ((None, str(index), "maya-seller"), "maya-seller", "maya-seller"),
+        ((None, str(index), ""), "?", ""),
+        ((None, None, None), "?", None),
+    ]
+    for (url, index_file, agent_name), name, subject in cases:
+        bundle_dir, _ = run_path_test(url, runs, index_file=index_file,
+                                      agent_name=agent_name, http=client())
+        run = load_bundle(bundle_dir)["run"]
+        assert run.participants[1] == {"name": name, "role": "subject"}
+        assert run.config["subject"] == subject
+        assert verify_bundle(bundle_dir) == []
+
+
+@pytest.mark.parametrize("argv", [
+    pytest.param(["--url", "   "], id="blank-url"),
+    pytest.param(["--index", "INDEX", "--agent-name", "   "],
+                 id="blank-agent-name"),
+])
+def test_cli_blank_locator_bundle_passes_nandatown_verify(tmp_path, capsys,
+                                                          argv):
+    from nandatown.cli import main
+
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": SUBJECT}}}))
+    argv = [str(index) if arg == "INDEX" else arg for arg in argv]
+
+    code = main(["test-agent", *argv, "--out", str(tmp_path / "runs")])
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "Traceback" not in out
+    bundle_dir = out.split("Evidence bundle: ", 1)[1].strip()
+    assert main(["verify", bundle_dir]) == 0
+    assert "bundle verified" in capsys.readouterr().out
 
 
 def test_town_driver_fault_is_an_error_not_a_failure(tmp_path,

@@ -172,9 +172,11 @@ class _Recorder:
 def _is_endpoint_url(value: object) -> bool:
     """Whether httpx parses value as an absolute http(s) URL with a host.
 
-    Any host and port is accepted: loopback, LAN and remote agents are all
-    valid subjects. Raw whitespace is refused because httpx would drop it
-    or percent-encode it into a different endpoint.
+    Any host and any TCP port (1-65535, or none for the scheme default) is
+    accepted: loopback, LAN and remote agents are all valid subjects. httpx
+    parses a port outside that range, which then fails only on connect.
+    Raw whitespace is refused because httpx would drop it or percent-encode
+    it into a different endpoint.
     """
     if not isinstance(value, str) or any(ch.isspace() for ch in value):
         return False
@@ -182,7 +184,24 @@ def _is_endpoint_url(value: object) -> bool:
         parsed = httpx.URL(value)
     except httpx.InvalidURL:
         return False
-    return parsed.scheme in ("http", "https") and bool(parsed.host)
+    return (parsed.scheme in ("http", "https") and bool(parsed.host)
+            and (parsed.port is None or 1 <= parsed.port <= 65535))
+
+
+def _subject_label(subject_url: str | None,
+                   agent_name: str | None) -> str | None:
+    """The locator that names the subject in the run record.
+
+    This is ``subject_url or agent_name`` with a whitespace-only locator
+    counted as empty: verify rejects a blank participant name and receipts
+    a blank subject, and such a locator has already failed resolution.
+    """
+    def usable(locator: str | None) -> str | None:
+        if isinstance(locator, str) and not locator.strip():
+            return ""
+        return locator
+
+    return usable(subject_url) or usable(agent_name)
 
 
 def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
@@ -418,13 +437,14 @@ def run_path_test(subject_url: str | None, out_dir: str,
         created_at=time.time(),
         participants=[
             {"name": "town-requester", "role": "requester"},
-            {"name": subject_url or agent_name or "?",
+            {"name": _subject_label(subject_url, agent_name) or "?",
              "role": "subject"},
         ],
         releases={"nandatown": __version__,
                   "evaluator": path_evaluator_version(profile),
                   "python": sys.version.split()[0]},
-        config={"mode": "path", "subject": subject_url or agent_name,
+        config={"mode": "path",
+                "subject": _subject_label(subject_url, agent_name),
                 "profile": profile.ref,
                 "pinned_card_digest": pinned,
                 "nonce": nonce,
