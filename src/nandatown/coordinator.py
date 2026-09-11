@@ -35,26 +35,38 @@ FAULT_TARGET_KIND = "quote_request"
 
 
 class InvalidJSONValue(HTTPException):
-    """A request body that parses but holds a value JSON text cannot
-    carry: NaN, Infinity, -Infinity or a number too large to be finite,
-    none of which JSON (RFC 8259) defines, or a string or object key
-    with an unpaired surrogate, which cannot be encoded as UTF-8.
-    Python's json module accepts all of them; stored, any one would make
-    the run's records impossible to export."""
+    """A request body that parses but holds a value Town cannot store
+    and export as JSON: NaN, Infinity or -Infinity, which JSON (RFC 8259)
+    does not define; a number too large for a double, such as 1e999,
+    which is valid JSON syntax but cannot be stored as a finite number;
+    or a string or object key with an unpaired surrogate, which cannot
+    be encoded as UTF-8. Python's json module accepts all of them;
+    stored, any one would make the run's records impossible to export."""
 
     REASONS = {
         "non_finite_number":
-            "JSON has no NaN or Infinity; send a finite number",
+            "NaN, Infinity or a number too large for a double, such as"
+            " 1e999, cannot be stored as a finite number; send a finite"
+            " number",
         "unpaired_surrogate":
             "a string or object key holds an unpaired surrogate, which"
             " cannot be encoded as UTF-8",
     }
 
+    # The most characters of a refused number's literal that are kept.
+    LITERAL_LIMIT = 32
+
     def __init__(self, problem: str, literal: str | None = None):
         # What the evidence records: which problem, and for a number
-        # its literal. A refused string is never echoed.
-        self.evidence: dict[str, str] = {"problem": problem}
-        if literal is not None:
+        # its literal, cut to LITERAL_LIMIT characters ending in "..."
+        # plus its full length when longer. A refused string is never
+        # echoed.
+        self.evidence: dict[str, Any] = {"problem": problem}
+        if literal is not None and len(literal) > self.LITERAL_LIMIT:
+            self.evidence["literal"] = (
+                literal[:self.LITERAL_LIMIT - 3] + "...")
+            self.evidence["literal_length"] = len(literal)
+        elif literal is not None:
             self.evidence["literal"] = literal
         super().__init__(status_code=422, detail={
             "error": "invalid_json_value", **self.evidence,
@@ -82,9 +94,16 @@ def _require_utf8(value: Any) -> None:
 
 
 class StrictJSONRequest(Request):
-    """Parses a JSON body and refuses any value JSON text cannot carry;
-    every other body parses exactly as it would with the standard
-    parser."""
+    """Parses a JSON body and refuses any value Town cannot store as
+    JSON; every other body parses exactly as it would with the standard
+    parser.
+
+    The body is read before the route's dependencies and handler run,
+    so before its session and grant permission checks. A grant-joined
+    session without the send or ack permission that posts an invalid
+    value is therefore recorded as invalid_json_value_rejected, not
+    grant_permission_denied; both attribute the refusal to that
+    participant."""
 
     async def json(self) -> Any:
         if not hasattr(self, "_json"):

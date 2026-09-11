@@ -1,8 +1,8 @@
 """Invalid JSON values at the coordinator's HTTP boundary.
 
-JSON text cannot carry NaN, Infinity, a number too large to be finite,
-or a string or key with an unpaired surrogate, yet Python's json module
-accepts all of them. A participant that sent one used to be accepted and
+Town cannot store NaN, Infinity, a number too large for a double such as
+1e999, or a string or key with an unpaired surrogate as JSON, yet
+Python's json module accepts all of them. A participant that sent one used to be accepted and
 stored; exporting the run's events then failed, and the run ended in a
 runner traceback with no evidence bundle. The coordinator now refuses
 such a request body, and a refusal of a joined participant's action is
@@ -19,10 +19,15 @@ import sys
 import pytest
 from fastapi.testclient import TestClient
 
-from nandatown.bundle import load_bundle, verify_bundle
+from nandatown.bundle import load_bundle, verify_bundle, write_bundle
 from nandatown.cli import main
 from nandatown.coordinator import build_app
-from nandatown.records import TestProfile
+from nandatown.evaluator import evaluate
+from nandatown.records import RunRecord, TestProfile, fingerprint
+from nandatown.report import render_report
+
+from test_evaluator import clean_events, ev
+from test_evaluator import profile as quote_profile
 
 ADMIN = {"X-Town-Admin": "secret"}
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -319,6 +324,43 @@ def test_finished_run_refuses_invalid_json_values_without_writing(
     assert intents(client, run_id) == intents_before
 
 
+@pytest.mark.parametrize("literal, kept", [
+    # 32 characters: named whole.
+    pytest.param("1e" + "0" * 27 + "999", "1e" + "0" * 27 + "999",
+                 id="32-chars"),
+    # 33 characters: cut to 32, ending in the marker.
+    pytest.param("1e" + "0" * 28 + "999", "1e" + "0" * 27 + "...",
+                 id="33-chars"),
+    # 200 KB: still 32.
+    pytest.param("9" * 200_000 + ".0", "9" * 29 + "...", id="200k-chars"),
+])
+def test_refused_literal_is_named_in_at_most_32_characters(
+        client, literal, kept):
+    """A refused number's literal is named, but a long one is cut: an
+    overflowing number costs the response, the intent and the event at
+    most 32 characters, plus its full length."""
+    run_id, sessions, _ = make_run(client)
+    text = NUMBER_SENDS["body"] % {"literal": literal}
+
+    r = post_raw(client, f"/runs/{run_id}/messages", text, sessions["buyer"])
+
+    recorded = {"problem": "non_finite_number", "literal": kept}
+    if kept != literal:
+        recorded["literal_length"] = len(literal)
+    assert r.status_code == 422, r.text
+    assert len(r.content) < 1000
+    detail = r.json()["detail"]
+    assert detail.pop("reason")
+    assert detail == {"error": "invalid_json_value", **recorded}
+    assert len(detail["literal"]) <= 32
+    (event,) = [e for e in events(client, run_id)
+                if e["kind"] == "invalid_json_value_rejected"]
+    assert event["detail"] == {"action": "send", **recorded}
+    assert [(i["actor"], i["action"], i["payload"])
+            for i in intents(client, run_id)] == [
+        ("buyer", "send", {"error": "invalid_json_value", **recorded})]
+
+
 def test_valid_json_values_and_lookalike_strings_are_stored_unchanged(
         client):
     run_id, sessions, _ = make_run(client)
@@ -396,3 +438,50 @@ def test_participant_sending_invalid_json_gets_an_honest_verifiable_bundle(
     assert all(p in [{"error": "invalid_json_value",
                       **{k: v for k, v in r.items() if k != "action"}}
                      for r in refusals] for p in seller_acks)
+    # The report says why the stages are inconclusive.
+    line = f"Refused as invalid JSON values: {len(refused)}."
+    assert line in printed
+    with open(os.path.join(bundle_dir, "report.md")) as f:
+        assert line in f.read()
+
+
+def write_quote_bundle(tmp_path, events):
+    p = quote_profile()
+    run = RunRecord(
+        run_id="run-1", profile_name=p.name,
+        profile_fingerprint=fingerprint(p.model_dump()), created_at=1.0,
+        participants=[{"name": "buyer", "role": "buyer"},
+                      {"name": "seller", "role": "seller"}],
+        releases={"nandatown": "0.2.0", "evaluator": "0.2.0",
+                  "python": "3.11"})
+    out = str(tmp_path / "bundle")
+    write_bundle(out, p, run, [], events,
+                 evaluate(p, "run-1", events))
+    assert verify_bundle(out) == []
+    return load_bundle(out)
+
+
+def test_report_counts_refusals_of_invalid_json_values(tmp_path):
+    events = [e for e in clean_events()
+              if not (e.kind == "ack_recorded" and e.observer == "seller")]
+    events += [
+        ev(100, "invalid_json_value_rejected", "seller", action="ack",
+           problem="non_finite_number", literal="NaN"),
+        ev(101, "invalid_json_value_rejected", "seller", action="ack",
+           problem="unpaired_surrogate"),
+        ev(102, "grant_permission_denied", "seller", permission="send"),
+    ]
+
+    report = render_report(write_quote_bundle(tmp_path, events))
+
+    assert "Verdict:   INCOMPLETE" in report
+    assert " Refused by grant permissions: 1." in report
+    assert " Refused as invalid JSON values: 2." in report
+    with open(tmp_path / "bundle" / "report.md") as f:
+        assert " Refused as invalid JSON values: 2." in f.read()
+
+
+def test_report_without_refusals_does_not_mention_them(tmp_path):
+    report = render_report(write_quote_bundle(tmp_path, clean_events()))
+
+    assert "Refused" not in report

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A seller whose acknowledgements hold values JSON text cannot carry.
+"""A seller whose acknowledgements hold values Town cannot store as JSON.
 
 Standard-library Python, like examples/byoa_seller.py, except for two
 mistakes a real agent can make with json.dumps defaults: a note key
