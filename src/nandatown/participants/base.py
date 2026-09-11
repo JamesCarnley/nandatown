@@ -32,6 +32,23 @@ class Journal:
                 " at REAL NOT NULL,"
                 " unreported INTEGER NOT NULL DEFAULT 0)"
             )
+            self._migrate(conn)
+
+    @classmethod
+    def _migrate(cls, conn) -> None:
+        """Bring a journal created by an earlier release up to date.
+
+        CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a
+        journal an operator keeps across an upgrade arrives without the
+        mark. Its rows read as reported, which is what they are: those
+        applications were acknowledged under the older code, or are gone
+        with the run that made them.
+        """
+        columns = {row[1] for row in
+                   conn.execute("PRAGMA table_info(processed)")}
+        if "unreported" not in columns:
+            conn.execute("ALTER TABLE processed ADD COLUMN unreported"
+                         " INTEGER NOT NULL DEFAULT 0")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=10.0)
