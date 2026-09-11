@@ -68,7 +68,7 @@ def run_campaign(name: str, trials: int, out_dir: str,
             record["stages"] = {s.name: s.status for s in result.stages}
             run_path = os.path.join(bundle_dir, "run.json")
             if os.path.exists(run_path):
-                with open(run_path) as f:
+                with open(run_path, encoding="utf-8") as f:
                     run_config = json.load(f).get("config", {})
                 if "model" in run_config:
                     record["model"] = run_config["model"]

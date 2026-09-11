@@ -81,7 +81,7 @@ def write_bundle(directory: str, profile, run: RunRecord,
     os.makedirs(directory, exist_ok=True)
 
     def write(name: str, text: str) -> None:
-        with open(os.path.join(directory, name), "w") as f:
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as f:
             f.write(text)
 
     write("profile.json", profile.model_dump_json(indent=2))
@@ -125,9 +125,10 @@ def attest_bundle(directory: str, keystore=None,
     keystore = keystore or Keystore(default_keystore_dir())
     signer = signer or OPERATOR_NAME
     identity = keystore.new_identity(signer)
-    with open(os.path.join(directory, "manifest.json")) as f:
+    with open(os.path.join(directory, "manifest.json"),
+              encoding="utf-8") as f:
         manifest = json.load(f)
-    with open(os.path.join(directory, "result.json")) as f:
+    with open(os.path.join(directory, "result.json"), encoding="utf-8") as f:
         result = json.load(f)
     payload = {
         "bundle_fingerprint": manifest["bundle_fingerprint"],
@@ -142,14 +143,15 @@ def attest_bundle(directory: str, keystore=None,
         "signature": keystore.sign(signer, payload),
         "controller_public": identity["controller_public"],
     }
-    with open(os.path.join(directory, "attestation.json"), "w") as f:
+    with open(os.path.join(directory, "attestation.json"), "w",
+              encoding="utf-8") as f:
         json.dump(attestation, f, indent=2)
     return attestation
 
 
 def load_bundle(directory: str) -> dict[str, Any]:
     def read(name: str) -> str:
-        with open(os.path.join(directory, name)) as f:
+        with open(os.path.join(directory, name), encoding="utf-8") as f:
             return f.read()
 
     manifest = json.loads(read("manifest.json"))
@@ -184,7 +186,7 @@ def verify_bundle(directory: str) -> list[str]:
     if manifest_problem:
         return [manifest_problem]
     try:
-        with open(manifest_path) as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return [f"manifest.json unreadable: {exc}"]
@@ -342,7 +344,7 @@ def verify_bundle(directory: str) -> list[str]:
             problems.append(attestation_problem)
             return problems
         try:
-            with open(attestation_path) as f:
+            with open(attestation_path, encoding="utf-8") as f:
                 attestation = json.load(f)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             problems.append(f"attestation.json unreadable: {exc}")
