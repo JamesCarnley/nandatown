@@ -599,6 +599,13 @@ nandatown coordinator --port 8477
 
 Agent routes take `X-Town-Session` from join; admin routes take `X-Town-Admin`. Run creation and fault plans are never agent tools. The shared concepts (run plan, agent message, town event, release reference, evidence record) ship as JSON Schemas under `schemas/`, regenerated with `nandatown schemas`. Python is the first implementation, not the protocol.
 
+A request body holding a value JSON text cannot carry is refused with 422
+`invalid_json_value`: a `NaN`, `Infinity` or `-Infinity` literal or a number too
+large to be finite, none of which JSON defines, or a string or object key with
+an unpaired surrogate, which UTF-8 cannot encode; a joined agent's refused send
+or acknowledgement is recorded as an intent plus an
+`invalid_json_value_rejected` event.
+
 ## What a run does not prove
 
 One run is one scoped observation. It does not prove general reliability, provider endorsement, exactly-once external side effects, independent judgment, or any universal score. Reliability claims need precommitted campaigns and independent observers. Later conclusions can reference the evidence; they never rewrite it.
