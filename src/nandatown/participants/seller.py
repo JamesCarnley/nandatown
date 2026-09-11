@@ -36,9 +36,9 @@ def build_handler(client: TownClient, journal: Journal):
             done = journal.get(message_id)
             note = {"duplicate": True}
             if journal.unreported(message_id):
-                # The application happened, but the acknowledgement that
-                # carried it was fenced, so the record still lacks it.
-                # Report the work actually done rather than let the
+                # The application happened, but no acknowledgement of it
+                # was ever accepted: the fence died first, or this seller
+                # did. Report the work actually done rather than let the
                 # evidence blame the seller for the lease timing.
                 note["applied"] = True
                 note["total_cents"] = done["total_cents"]
@@ -53,8 +53,11 @@ def build_handler(client: TownClient, journal: Journal):
                      "quantity": body["quantity"],
                      "total_cents": total_cents},
         }
+        # The application and the mark saying the town has not recorded it
+        # commit together, before the acknowledgement is even attempted.
         journal.record(message_id, {"reply": reply,
-                                    "total_cents": total_cents})
+                                    "total_cents": total_cents},
+                       unreported=True)
         return "processed", {"applied": True, "total_cents": total_cents}, [reply]
 
     return handler
@@ -81,25 +84,20 @@ def crash_wrapper(client: TownClient, journal: Journal, state_dir: str,
     return handler
 
 
-def ack_outcome(journal: Journal):
-    """Track which applications the town has actually recorded.
+def ack_accepted(journal: Journal):
+    """Clear the mark once the record carries the application.
 
-    An applied acknowledgement refused as a stale fence never reached
-    the evidence, so the application behind it stays unreported and the
-    next delivery of that work must carry it. An accepted one is in the
-    record, so it must never be claimed a second time.
+    An accepted acknowledgement is the only proof that an assertion of
+    this seller's own reached the evidence. Until one arrives the
+    application stays marked unreported, and every redelivery carries
+    it again.
     """
-    def on_ack(claim: dict[str, Any], note: dict[str, Any],
-               accepted: bool) -> None:
-        message_id = claim["message_id"]
-        if not note.get("applied") or not journal.seen(message_id):
-            return
-        if accepted:
-            journal.clear_unreported(message_id)
-        else:
-            journal.mark_unreported(message_id, claim["fence"])
+    def on_ack_accepted(claim: dict[str, Any],
+                        note: dict[str, Any]) -> None:
+        if note.get("applied"):
+            journal.mark_reported(claim["message_id"])
 
-    return on_ack
+    return on_ack_accepted
 
 
 def run(client: TownClient, name: str, token: str, state_dir: str,
@@ -113,7 +111,7 @@ def run(client: TownClient, name: str, token: str, state_dir: str,
         handler = crash_wrapper(client, journal, state_dir, lease, handler)
     deadline = time.time() + deadline_seconds
     run_loop(client, handler, until=lambda: time.time() > deadline,
-             on_ack=ack_outcome(journal))
+             on_ack_accepted=ack_accepted(journal))
     return 0
 
 
