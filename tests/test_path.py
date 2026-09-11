@@ -447,22 +447,38 @@ def test_blank_url_writes_a_bundle_that_verifies(tmp_path, url):
     _assert_verifiable_with_receipt(bundle_dir, tmp_path)
 
 
+BLANK_AGENT_NAME_REASON = ("blank agent name: expected a non-blank name to"
+                           " look up in the pinned index")
+
+
 @pytest.mark.parametrize("listed", [True, False], ids=["listed", "unlisted"])
-@pytest.mark.parametrize("agent_name", ["   ", "\t"])
-def test_blank_agent_name_writes_a_bundle_that_verifies(tmp_path, agent_name,
-                                                        listed):
+@pytest.mark.parametrize("agent_name", ["   ", "\t", "", None])
+def test_blank_agent_name_fails_resolution_before_the_index_lookup(
+        tmp_path, agent_name, listed):
+    """An index may list a blank name, but a run must name its subject.
+
+    Resolving one let a passing receipt name its subject "?".
+    """
     index = tmp_path / "index.json"
     index.write_text(json.dumps({"agents": {
-        (agent_name if listed else "maya-seller"): {"url": SUBJECT}}}))
+        ((agent_name or "") if listed else "maya-seller"): {"url": SUBJECT}}}))
 
     bundle_dir, result = run_path_test(
         None, str(tmp_path / "runs"), index_file=str(index),
         agent_name=agent_name, http=client())
 
-    assert stage(result, "resolution").status == (
-        "passed" if listed else "failed")
+    _assert_resolution_refused(bundle_dir, result, BLANK_AGENT_NAME_REASON)
     assert load_bundle(bundle_dir)["run"].participants[1]["name"] == "?"
     _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+def test_blank_agent_name_is_refused_before_reading_the_index(tmp_path):
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"),
+        index_file=str(tmp_path / "missing.json"), agent_name="   ",
+        http=client())
+
+    _assert_resolution_refused(bundle_dir, result, BLANK_AGENT_NAME_REASON)
 
 
 def test_subject_names_are_recorded_unchanged(tmp_path):
@@ -489,6 +505,8 @@ def test_subject_names_are_recorded_unchanged(tmp_path):
     pytest.param(["--url", "   "], id="blank-url"),
     pytest.param(["--index", "INDEX", "--agent-name", "   "],
                  id="blank-agent-name"),
+    pytest.param(["--index", "BLANK_INDEX", "--agent-name", "   "],
+                 id="blank-agent-name-listed"),
 ])
 def test_cli_blank_locator_bundle_passes_nandatown_verify(tmp_path, capsys,
                                                           argv):
@@ -496,13 +514,21 @@ def test_cli_blank_locator_bundle_passes_nandatown_verify(tmp_path, capsys,
 
     index = tmp_path / "index.json"
     index.write_text(json.dumps({"agents": {"maya-seller": {"url": SUBJECT}}}))
-    argv = [str(index) if arg == "INDEX" else arg for arg in argv]
+    # Listed under a blank name at a closed loopback port: resolving it
+    # would reach card retrieval instead of failing resolution.
+    blank_index = tmp_path / "blank-index.json"
+    blank_index.write_text(json.dumps(
+        {"agents": {"   ": {"url": "http://127.0.0.1:9"}}}))
+    paths = {"INDEX": str(index), "BLANK_INDEX": str(blank_index)}
+    argv = [paths.get(arg, arg) for arg in argv]
 
     code = main(["test-agent", *argv, "--out", str(tmp_path / "runs")])
 
     out = capsys.readouterr().out
     assert code == 1
     assert "Traceback" not in out
+    if "--agent-name" in argv:
+        assert BLANK_AGENT_NAME_REASON in out
     bundle_dir = out.split("Evidence bundle: ", 1)[1].strip()
     assert main(["verify", bundle_dir]) == 0
     assert "bundle verified" in capsys.readouterr().out

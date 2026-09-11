@@ -194,7 +194,9 @@ def _subject_label(subject_url: str | None,
 
     This is ``subject_url or agent_name`` with a whitespace-only locator
     counted as empty: verify rejects a blank participant name and receipts
-    a blank subject, and such a locator has already failed resolution.
+    a blank subject. Resolution refuses a blank URL and a blank agent name,
+    even one an index lists, so a run that records its subject as "?"
+    never gets past resolution.
     """
     def usable(locator: str | None) -> str | None:
         if isinstance(locator, str) and not locator.strip():
@@ -220,6 +222,11 @@ def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
                           agent_name or "?", {"reason": reason})
             return None, None
 
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            # An index may list a blank name, which would let a passing
+            # run and its receipt leave the subject unnamed.
+            return fail("blank agent name: expected a non-blank name to"
+                        " look up in the pinned index")
         try:
             with open(index_file) as f:
                 index = json.load(f)
