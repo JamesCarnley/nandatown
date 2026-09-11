@@ -190,16 +190,19 @@ def _is_endpoint_url(value: object) -> bool:
 
 def _subject_label(subject_url: str | None,
                    agent_name: str | None) -> str | None:
-    """The locator that names the subject in the run record.
+    """The locator that names the subject in the run record and events.
 
     This is ``subject_url or agent_name`` with a whitespace-only locator
-    counted as empty: verify rejects a blank participant name and receipts
-    a blank subject. Resolution refuses a blank URL and a blank agent name,
-    even one an index lists, so a run that records its subject as "?"
-    never gets past resolution.
+    counted as empty and a non-string one as absent: verify rejects a blank
+    or non-string participant name, receipts a blank subject, and events
+    need a string subject. Resolution refuses a blank or non-string URL and
+    agent name, even one an index lists, so a run that records its subject
+    as "?" never gets past resolution.
     """
-    def usable(locator: str | None) -> str | None:
-        if isinstance(locator, str) and not locator.strip():
+    def usable(locator: object) -> str | None:
+        if not isinstance(locator, str):
+            return None
+        if not locator.strip():
             return ""
         return locator
 
@@ -216,10 +219,11 @@ def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
     if index_file:
         recorder.intend("town-requester", "resolve",
                         {"index": index_file, "agent": agent_name})
+        subject = _subject_label(None, agent_name) or "?"
 
         def fail(reason: str) -> tuple[None, None]:
-            recorder.emit("town-requester", "resolution_failed",
-                          agent_name or "?", {"reason": reason})
+            recorder.emit("town-requester", "resolution_failed", subject,
+                          {"reason": reason})
             return None, None
 
         if not isinstance(agent_name, str) or not agent_name.strip():
@@ -228,11 +232,13 @@ def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
             return fail("blank agent name: expected a non-blank name to"
                         " look up in the pinned index")
         try:
-            with open(index_file) as f:
+            # JSON is UTF-8 whatever the locale, so a non-ASCII agent name
+            # resolves the same on every machine.
+            with open(index_file, encoding="utf-8") as f:
                 index = json.load(f)
         except (OSError, ValueError, RecursionError) as exc:
-            # Includes invalid JSON, undecodable bytes and nesting past the
-            # recursion limit.
+            # Includes invalid JSON, bytes that are not UTF-8 and nesting
+            # past the recursion limit.
             return fail(f"index unreadable: {exc}")
         # The index is operator-supplied fixture JSON: check its shape
         # before trusting it, and name the problem without echoing values.
@@ -261,18 +267,18 @@ def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
             # untested instead of checking it.
             return fail('malformed index: the entry "card_digest" must be'
                         " a non-empty string")
-        recorder.emit("town-requester", "resolution_hop",
-                      agent_name or "?",
+        recorder.emit("town-requester", "resolution_hop", subject,
                       {"kind": "pinned-index", "index": index_file,
                        "url": entry["url"]})
         return entry["url"], entry.get("card_digest")
     recorder.intend("town-requester", "resolve", {"url": url})
+    subject = _subject_label(url, None) or "?"
     if not _is_endpoint_url(url):
-        recorder.emit("town-requester", "resolution_failed", url or "?",
+        recorder.emit("town-requester", "resolution_failed", subject,
                       {"reason": "invalid endpoint URL: expected an"
                                  " absolute http(s) URL"})
         return None, None
-    recorder.emit("town-requester", "resolution_hop", url or "?",
+    recorder.emit("town-requester", "resolution_hop", subject,
                   {"kind": "direct", "url": url})
     return url, None
 

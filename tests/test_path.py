@@ -434,6 +434,11 @@ def _assert_verifiable_with_receipt(bundle_dir, tmp_path):
     assert receipt["payload"]["claim"]["subject"].strip()
 
 
+def _resolution_subjects(bundle_dir):
+    return [event.subject for event in load_bundle(bundle_dir)["events"]
+            if event.kind in ("resolution_failed", "resolution_hop")]
+
+
 @pytest.mark.parametrize("url", ["", "   ", "\t\n"])
 def test_blank_url_writes_a_bundle_that_verifies(tmp_path, url):
     """A blank locator must not become the recorded subject name."""
@@ -444,15 +449,40 @@ def test_blank_url_writes_a_bundle_that_verifies(tmp_path, url):
     run = load_bundle(bundle_dir)["run"]
     assert run.participants[1] == {"name": "?", "role": "subject"}
     assert run.config["subject"] in (None, "")
+    assert _resolution_subjects(bundle_dir) == ["?"]
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+@pytest.mark.parametrize("url", [
+    pytest.param(5, id="number"),
+    pytest.param([SUBJECT], id="list"),
+])
+def test_non_string_url_fails_resolution_without_crashing(tmp_path, url):
+    """An API caller's non-string URL once crashed recording the event."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"),
+                                       http=client())
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+    assert load_bundle(bundle_dir)["run"].participants[1]["name"] == "?"
+    assert _resolution_subjects(bundle_dir) == ["?"]
     _assert_verifiable_with_receipt(bundle_dir, tmp_path)
 
 
 BLANK_AGENT_NAME_REASON = ("blank agent name: expected a non-blank name to"
                            " look up in the pinned index")
+# Whitespace-only: truthy, so no caller-side "is a name given" check can
+# stop one before resolution does.
+WHITESPACE_AGENT_NAMES = [
+    pytest.param("   ", id="spaces"),
+    pytest.param("\t", id="tab"),
+    pytest.param("\n", id="newline"),
+    pytest.param(" \t\r\n", id="mixed"),
+    pytest.param("\u00a0\u3000", id="unicode-spaces"),
+]
 
 
 @pytest.mark.parametrize("listed", [True, False], ids=["listed", "unlisted"])
-@pytest.mark.parametrize("agent_name", ["   ", "\t", "", None])
+@pytest.mark.parametrize("agent_name", WHITESPACE_AGENT_NAMES)
 def test_blank_agent_name_fails_resolution_before_the_index_lookup(
         tmp_path, agent_name, listed):
     """An index may list a blank name, but a run must name its subject.
@@ -461,15 +491,127 @@ def test_blank_agent_name_fails_resolution_before_the_index_lookup(
     """
     index = tmp_path / "index.json"
     index.write_text(json.dumps({"agents": {
-        ((agent_name or "") if listed else "maya-seller"): {"url": SUBJECT}}}))
+        (agent_name if listed else "maya-seller"): {"url": SUBJECT}}}))
 
     bundle_dir, result = run_path_test(
         None, str(tmp_path / "runs"), index_file=str(index),
         agent_name=agent_name, http=client())
 
     _assert_resolution_refused(bundle_dir, result, BLANK_AGENT_NAME_REASON)
-    assert load_bundle(bundle_dir)["run"].participants[1]["name"] == "?"
+    run = load_bundle(bundle_dir)["run"]
+    assert run.participants[1] == {"name": "?", "role": "subject"}
+    assert run.config["subject"] in (None, "")
+    assert _resolution_subjects(bundle_dir) == ["?"]
     _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+@pytest.mark.parametrize("listed", [True, False], ids=["listed", "unlisted"])
+@pytest.mark.parametrize("agent_name", ["", None], ids=["empty", "none"])
+def test_empty_agent_name_never_resolves_an_index_entry(tmp_path,
+                                                        agent_name, listed):
+    """An index listing "" must not let a nameless run resolve.
+
+    The run is either refused before it starts or fails resolution with a
+    bundle that verifies; both keep the subject from going unnamed.
+    """
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {
+        ("" if listed else "maya-seller"): {"url": SUBJECT}}}))
+    runs = tmp_path / "runs"
+
+    try:
+        bundle_dir, result = run_path_test(
+            None, str(runs), index_file=str(index), agent_name=agent_name,
+            http=client())
+    except ValueError:
+        assert not runs.exists() or not any(runs.iterdir())
+        return
+
+    _assert_resolution_refused(bundle_dir, result, BLANK_AGENT_NAME_REASON)
+    assert _resolution_subjects(bundle_dir) == ["?"]
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+@pytest.mark.parametrize("agent_name", [
+    pytest.param(["maya-seller"], id="list"),
+    pytest.param({"name": "maya-seller"}, id="object"),
+    pytest.param(5, id="number"),
+])
+def test_non_string_agent_name_fails_resolution_without_crashing(
+        tmp_path, agent_name):
+    """An API caller's non-string name once crashed recording the event."""
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": SUBJECT}}}))
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name=agent_name, http=client())
+
+    _assert_resolution_refused(bundle_dir, result, BLANK_AGENT_NAME_REASON)
+    run = load_bundle(bundle_dir)["run"]
+    assert run.participants[1] == {"name": "?", "role": "subject"}
+    assert run.config["subject"] is None
+    assert _resolution_subjects(bundle_dir) == ["?"]
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+@pytest.mark.parametrize("agent_name, resolves", [
+    ("maya-seller", True),
+    (" maya-seller ", True),
+    ("Zoë", True),
+    ("nobody", False),
+])
+def test_non_blank_agent_name_is_the_resolution_subject_verbatim(
+        tmp_path, agent_name, resolves):
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {
+        "maya-seller": {"url": SUBJECT}, " maya-seller ": {"url": SUBJECT},
+        "Zoë": {"url": SUBJECT}}}, ensure_ascii=False),
+        encoding="utf-8")
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name=agent_name, http=client())
+
+    assert stage(result, "resolution").status == (
+        "passed" if resolves else "failed")
+    assert _resolution_subjects(bundle_dir) == [agent_name]
+    assert load_bundle(bundle_dir)["run"].participants[1]["name"] \
+        == agent_name
+    assert verify_bundle(bundle_dir) == []
+
+
+def test_utf8_index_resolves_a_non_ascii_name_whatever_the_locale(tmp_path):
+    """Reading the index with the locale's encoding failed it as unreadable."""
+    index = tmp_path / "index.json"
+    index.write_bytes(json.dumps({"agents": {"Zoë": {"url": SUBJECT}}},
+                                 ensure_ascii=False).encode("utf-8"))
+    assert "Zoë".encode("utf-8") in index.read_bytes()
+    child = (
+        "import json, locale, sys\n"
+        "from nandatown.path_runner import _Recorder, _resolve\n"
+        "encoding = locale.getpreferredencoding(False)\n"
+        "assert not sys.flags.utf8_mode\n"
+        "assert encoding.replace('-', '').lower() != 'utf8', encoding\n"
+        "recorder = _Recorder('path-locale')\n"
+        "url, _ = _resolve(recorder, None, sys.argv[1], 'Zo\\u00eb')\n"
+        "print(json.dumps({'url': url, 'events': [\n"
+        "    [e.kind, e.subject, e.detail.get('reason')]\n"
+        "    for e in recorder.events]}))\n")
+    source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+                       PYTHONPATH=os.path.join(source_root, "src"),
+                       PYTHONUTF8="0", PYTHONCOERCECLOCALE="0",
+                       LC_ALL="C", LANG="C")
+
+    completed = subprocess.run(
+        [sys.executable, "-c", child, str(index)], env=environment,
+        capture_output=True, text=True, timeout=60)
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "url": SUBJECT,
+        "events": [["resolution_hop", "Zoë", None]]}
 
 
 def test_blank_agent_name_is_refused_before_reading_the_index(tmp_path):
@@ -489,7 +631,6 @@ def test_subject_names_are_recorded_unchanged(tmp_path):
     cases = [
         ((SUBJECT, None, None), SUBJECT, SUBJECT),
         ((None, str(index), "maya-seller"), "maya-seller", "maya-seller"),
-        ((None, str(index), ""), "?", ""),
         ((None, None, None), "?", None),
     ]
     for (url, index_file, agent_name), name, subject in cases:
