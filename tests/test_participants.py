@@ -103,4 +103,6 @@ def test_buyer_and_seller_complete_clean_run(tmp_path):
     note = buyer_acks[-1]["detail"]["note"]
     assert note["correct"] is True
     assert note["total_cents"] == 3990
-    assert len(seller_acks) == 1, events
+    assert len(seller_acks) == 1, \
+        (f"seller recorded {len(seller_acks)} applied acks within 5 s,"
+         f" expected 1: {events}")
