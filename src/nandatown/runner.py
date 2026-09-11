@@ -400,15 +400,17 @@ def _buyer_settled_response(events: list[dict[str, Any]]) -> bool:
                for e in events)
 
 
-def _response_accepted(events: list[dict[str, Any]]) -> bool:
-    """Has the town accepted a quote response for the buyer?
+def _response_accepted(events: list[dict[str, Any]], buyer: str) -> bool:
+    """Has the town accepted a quote response addressed to the buyer?
 
     From then on the response waits in the buyer's inbox: a seller that
     exits has finished its part, and claiming and judging the response
-    is the buyer's.
+    is the buyer's. A response sent to anyone else never reaches that
+    inbox, so it leaves the buyer nothing to finish.
     """
     return any(e["kind"] == "message_accepted"
                and e["detail"].get("kind") == RESPONSE_KIND
+               and e["detail"].get("to") == buyer
                for e in events)
 
 
@@ -548,6 +550,9 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
 
         restarted = False
         seller_done = False
+        # The participant the evaluator judges as the buyer.
+        buyer_name = next((n for n, r in profile.roles.items()
+                           if r == "buyer"), "buyer")
         refused_role: str | None = None
         deadline = time.time() + wait_timeout
         while time.time() < deadline:
@@ -587,11 +592,11 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
                         post_event("runner", "participant_exited",
                                    "seller", {"exit_code": rc})
                         if buyer is None or not _response_accepted(
-                                get_events()):
+                                get_events(), buyer_name):
                             break
-                        # The seller left after its quote response was
-                        # accepted, so its part is over, but the buyer
-                        # process still has to claim and judge that
+                        # The seller left after its quote response to the
+                        # buyer was accepted, so its part is over, but the
+                        # buyer process still has to claim and judge that
                         # response. Let the buyer finish and exit on its
                         # own, within the same deadline.
                         seller_done = True

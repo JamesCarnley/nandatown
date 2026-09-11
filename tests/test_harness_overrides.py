@@ -248,7 +248,9 @@ def test_external_buyer_that_never_asserts_is_incomplete_within_timeout(
 
 # A seller subject that serves exactly one request and exits 0. With
 # argv[1] "respond" it sends the quote response and acknowledges the
-# request first; with "silent" it claims the request and leaves.
+# request first; "misaddressed" does the same but sends the response to
+# itself instead of the buyer; with "silent" it claims the request and
+# leaves.
 ONE_SHOT_SELLER = """\
 import os, sys, time
 from nandatown.client import TownClient
@@ -259,10 +261,11 @@ claim, deadline = None, time.time() + 30
 while claim is None and time.time() < deadline:
     client.notify(wait=0.2)
     claim = client.claim()
-if claim is not None and sys.argv[1] == "respond":
+if claim is not None and sys.argv[1] in ("respond", "misaddressed"):
     body = claim["body"]
     total = body["quantity"] * body["unit_price_cents"]
-    client.send(message_id="r-1", to=claim["from"], kind="quote_response",
+    to = claim["from"] if sys.argv[1] == "respond" else os.environ["NAME"]
+    client.send(message_id="r-1", to=to, kind="quote_response",
                 body={"request_id": claim["message_id"],
                       "total_cents": total})
     client.ack(claim["message_id"], claim["fence"], "processed",
@@ -346,6 +349,27 @@ def test_seller_that_exits_without_responding_still_ends_the_run(
     # Ended by the seller's exit (plus the settle wait), not by the
     # stock buyer's 45 s deadline or the 60 s timeout.
     assert elapsed < 30
+
+
+def test_seller_whose_response_is_not_for_the_buyer_still_ends_the_run(
+        tmp_path, capsys):
+    # The seller answered, acknowledged and exited 0, but sent its quote
+    # response to itself. Nothing waits in the buyer's inbox, so Town's
+    # buyer has nothing left to finish and the seller's exit ends the run.
+    code, result, events, elapsed = _test_one_shot_seller(
+        tmp_path, capsys, "misaddressed")
+
+    stages = {s.name: s for s in result.stages}
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert (code, result.verdict) == (1, "incomplete"), detail
+    assert stages["response"].status == "not_enough_evidence", detail
+    accepted = next(e for e in events if e.kind == "message_accepted"
+                    and e.subject == "r-1")
+    assert accepted.detail["to"] == "seller"
+    assert any(e.kind == "participant_exited" and e.subject == "seller"
+               and e.detail == {"exit_code": 0} for e in events)
+    # Not held until the stock buyer gives up at its 45 s deadline.
+    assert elapsed < 15
 
 
 def test_llm_harness_overrides_scripted_profile(tmp_path):
