@@ -773,8 +773,10 @@ def main(argv: list[str] | None = None) -> int:
                              " agent to connect from outside")
     p_test.add_argument("--timeout", type=float, default=60.0,
                         help="seconds the --cmd/--wait run may last"
-                             " (default 60; minimum 20: Town's stock"
-                             " buyer stops 15 s before the run does)")
+                             " (default 60; minimum 20 for either role:"
+                             " a buyer Town starts gets a DEADLINE of the"
+                             " timeout minus 15 s, and a buyer needs at"
+                             " least 5 s to request and check a quote)")
     p_test.add_argument("--out", default="runs")
     p_test.set_defaults(func=cmd_test_agent)
 

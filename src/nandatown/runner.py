@@ -34,18 +34,20 @@ from .profiles import PROFILES
 
 SELLER_CRASH_EXIT = 3
 
-# Town's stock participants get a DEADLINE carved out of the run's wait
-# timeout: the seller stops SELLER_DEADLINE_MARGIN seconds before the
-# runner does and the buyer BUYER_DEADLINE_MARGIN seconds before, so the
-# seller is still serving while the buyer waits and the runner outlives
-# both.
+# Every participant the runner starts, Town's stock agent or a --cmd
+# agent under test, gets a DEADLINE carved out of the run's wait timeout:
+# the seller's is the timeout minus SELLER_DEADLINE_MARGIN and the
+# buyer's the timeout minus BUYER_DEADLINE_MARGIN, so the seller is still
+# serving while the buyer waits and the runner outlives both. An agent
+# that joins from outside (--wait) is given no DEADLINE.
 SELLER_DEADLINE_MARGIN = 5.0
 BUYER_DEADLINE_MARGIN = 15.0
-# The least time left to the stock buyer, the counterpart with the shorter
-# DEADLINE, to request, receive and check a quote: one default lease. The
+# The least time a buyer, the participant with the shorter DEADLINE,
+# needs to request, receive and check a quote: one default lease. The
 # slowest stock profile, quote-crash-restart, takes about 3.5 s end to
-# end. Any shorter wait timeout would starve Town's own counterpart and
-# report the agent under test INCOMPLETE for it, so it is refused.
+# end. Any shorter wait timeout would starve a buyer the runner starts,
+# and the run would be reported INCOMPLETE for Town's arithmetic rather
+# than for the agent under test, so it is refused for either role.
 MIN_BUYER_BUDGET = 5.0
 MIN_WAIT_TIMEOUT = BUYER_DEADLINE_MARGIN + MIN_BUYER_BUDGET  # 20 s
 
@@ -62,10 +64,11 @@ def check_wait_timeout(wait_timeout: float,
                          f" seconds; give at least {MIN_WAIT_TIMEOUT:g} s")
     if wait_timeout < MIN_WAIT_TIMEOUT:
         raise ValueError(
-            f"{name} {wait_timeout:g} s is too short: Town's stock buyer"
-            f" stops {BUYER_DEADLINE_MARGIN:g} s before the run does and"
-            f" needs {MIN_BUYER_BUDGET:g} s to request and check a quote,"
-            f" so give at least {MIN_WAIT_TIMEOUT:g} s")
+            f"{name} {wait_timeout:g} s is too short: a buyer Town starts"
+            f" gets a DEADLINE of the timeout minus"
+            f" {BUYER_DEADLINE_MARGIN:g} s, and a buyer needs at least"
+            f" {MIN_BUYER_BUDGET:g} s to request and check a quote, so"
+            f" give at least {MIN_WAIT_TIMEOUT:g} s")
 
 
 _BUILTIN_ENV_KEYS = (

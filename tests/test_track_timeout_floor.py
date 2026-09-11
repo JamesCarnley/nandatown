@@ -68,6 +68,9 @@ def test_test_agent_refuses_a_short_timeout_as_usage_error(
     assert code == 2, out
     assert f"--timeout {float(timeout):g} s is too short" in out
     assert "at least 20 s" in out
+    # True whichever role is under test: with --role buyer Town starts
+    # no stock buyer.
+    assert "stock buyer" not in out
     assert "export TOKEN" not in out  # refused before any credentials
     assert not out_dir.exists()
 
@@ -79,6 +82,7 @@ def test_test_agent_help_names_the_minimum(capsys):
     help_text = " ".join(capsys.readouterr().out.split())
     assert (f"minimum {runner_module.MIN_WAIT_TIMEOUT:g}"
             in help_text), help_text
+    assert "stock buyer" not in help_text
 
 
 def test_the_minimum_timeout_runs_and_gives_the_buyer_a_budget(
