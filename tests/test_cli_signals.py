@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -237,6 +238,93 @@ def test_runner_holds_stop_signals_while_a_process_starts():
         assert signal.getsignal(signal.SIGTERM) is handler
     finally:
         signal.signal(signal.SIGTERM, previous)
+
+
+class _Interrupted(Exception):
+    """Stands in for KeyboardInterrupt, which would stop pytest itself."""
+
+
+def test_a_stop_signal_while_handlers_are_restored_leaves_both_restored(
+        monkeypatch):
+    # SIGINT is raised as soon as the guard has put SIGINT's handler back,
+    # before SIGTERM's, the moment a real SIGINT could land. Recording
+    # handlers stand in for the caller's, so neither signal meets its
+    # default disposition in the test process.
+    seen = []
+
+    def on_sigint(_signum, _frame):
+        seen.append("SIGINT")
+        raise _Interrupted
+
+    def on_sigterm(_signum, _frame):
+        seen.append("SIGTERM")
+
+    def set_handler(signum, handler):
+        previous = signal.signal(signum, handler)
+        if handler is on_sigint:
+            signal.raise_signal(signal.SIGINT)
+        return previous
+
+    instrumented = types.ModuleType("signal")
+    instrumented.__dict__.update(vars(signal))
+    instrumented.signal = set_handler
+    previous = {signum: signal.signal(signum, handler) for signum, handler
+                in [(signal.SIGINT, on_sigint), (signal.SIGTERM, on_sigterm)]}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    try:
+        monkeypatch.setattr(runner, "signal", instrumented)
+        with pytest.raises(_Interrupted):
+            with runner._stop_signals_held():
+                pass
+        assert seen == ["SIGINT"]
+        # A later SIGTERM reaches the caller's handler, not the guard's.
+        signal.raise_signal(signal.SIGTERM)
+        assert seen == ["SIGINT", "SIGTERM"]
+        assert signal.getsignal(signal.SIGINT) is on_sigint
+        assert signal.getsignal(signal.SIGTERM) is on_sigterm
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == mask
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def test_holding_unblocks_stop_signals_when_blocking_them_raises(
+        monkeypatch):
+    # Blocking runs any other pending Python handler, which may raise after
+    # the mask has changed; processes started later must not inherit
+    # blocked stop signals.
+    def block_then_raise(how, signals):
+        previous = signal.pthread_sigmask(how, signals)
+        if how == signal.SIG_BLOCK and signals:
+            raise _Interrupted
+        return previous
+
+    instrumented = types.ModuleType("signal")
+    instrumented.__dict__.update(vars(signal))
+    instrumented.pthread_sigmask = block_then_raise
+    previous = {signum: signal.getsignal(signum)
+                for signum in (signal.SIGINT, signal.SIGTERM)}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    try:
+        monkeypatch.setattr(runner, "signal", instrumented)
+        with pytest.raises(_Interrupted):
+            with runner._stop_signals_held():
+                pass
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == mask
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def test_holding_leaves_a_callers_blocked_stop_signal_blocked():
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])
+    try:
+        with runner._stop_signals_held():
+            pass
+        assert signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
 def test_sigterm_handling_is_scoped_to_the_command(monkeypatch):

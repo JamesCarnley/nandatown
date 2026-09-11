@@ -113,9 +113,29 @@ def _stop_signals_held():
                 signal.signal(signum, lambda s, _frame: held.append(s))
         yield
     finally:
-        for signum, previous in saved.items():
-            signal.signal(signum, previous)
+        # Both signals are blocked while their handlers are put back, so one
+        # that arrives meanwhile waits and then reaches its restored handler,
+        # once, when the caller's mask returns. Unblocked, a SIGINT between
+        # the two restores would unwind and leave the recording handler in
+        # place for SIGTERM. The mask is per thread, so this covers a caller
+        # without other threads, such as the CLI. No process starts while
+        # the signals are blocked, so none inherits the blocked mask.
+        mask = None
+        try:
+            if saved and hasattr(signal, "pthread_sigmask"):
+                mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+                signal.pthread_sigmask(signal.SIG_BLOCK, list(saved))
+            for signum, previous in saved.items():
+                signal.signal(signum, previous)
+        finally:
+            if mask is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         for signum in dict.fromkeys(held):
+            # If this handler raises, a second held signal is not raised
+            # again; the caller is already unwinding, and its cleanup runs.
+            # A signal wakeup fd, such as an asyncio loop's, sees a held
+            # signal twice, on arrival and here; the TUI runs run_town in
+            # worker threads, where nothing is held.
             signal.raise_signal(signum)
 
 
