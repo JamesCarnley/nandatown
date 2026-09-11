@@ -1,6 +1,7 @@
 """Stopping the CLI must also stop the Town processes it started."""
 
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -11,6 +12,7 @@ import time
 import pytest
 
 import nandatown.cli as cli
+import nandatown.runner as runner
 
 pytestmark = pytest.mark.skipif(
     os.name != "posix", reason="POSIX signal delivery and process listing")
@@ -154,6 +156,87 @@ def test_stopping_test_agent_stops_every_process_it_started(tmp_path,
                              in _processes().items()
                              if _serves(args, db_path))
         _kill(leftovers)
+
+
+# The CLI with subprocess.Popen wrapped so that SIGTERM arrives just as the
+# Nth Town process has started: Popen has returned, but the runner has not
+# yet recorded the process for cleanup.
+_SIGTERM_AS_A_PROCESS_STARTS = """
+import os, signal, subprocess, sys
+import nandatown.cli as cli
+
+target, record = int(sys.argv[1]), sys.argv[2]
+real_popen, started = subprocess.Popen, []
+
+def popen(*args, **kwargs):
+    process = real_popen(*args, **kwargs)
+    if kwargs.get("start_new_session"):  # the runner's Town processes
+        started.append(process.pid)
+        if len(started) == target:
+            with open(record, "w") as f:
+                f.write(str(process.pid))
+            os.kill(os.getpid(), signal.SIGTERM)
+    return process
+
+subprocess.Popen = popen
+sys.exit(cli.main(sys.argv[3:]))
+"""
+
+
+@needs_ps
+@pytest.mark.parametrize("target", [1, 2, 3],
+                         ids=["coordinator", "seller", "buyer"])
+def test_sigterm_as_a_town_process_starts_still_stops_it(tmp_path, target):
+    _require_default(signal.SIGTERM)
+    record = tmp_path / "started.pid"
+    # Participants that neither join nor exit when the coordinator stops,
+    # so one the runner had not recorded would keep running.
+    idle = (f"cmd:{shlex.quote(sys.executable)}"
+            " -c 'import time; time.sleep(60)'")
+    process = subprocess.Popen(
+        [sys.executable, "-c", _SIGTERM_AS_A_PROCESS_STARTS, str(target),
+         str(record), "run", "quote-clean", "--out", str(tmp_path / "runs"),
+         "--agent", f"seller={idle}", "--agent", f"buyer={idle}"],
+        env=CLI_ENV, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    pid = None
+    try:
+        returncode = process.wait(timeout=30)
+        assert record.exists(), f"process {target} never started"
+        pid = int(record.read_text())
+        # Seconds after it started, the pid cannot have been reused.
+        deadline = time.monotonic() + 3
+        while pid in _processes() and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+        running = pid in _processes()
+        assert not running, \
+            "a process started as SIGTERM arrived outlived the CLI"
+        assert returncode == -signal.SIGTERM
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        if pid is not None and pid in _processes():
+            _kill([pid])
+
+
+def test_runner_holds_stop_signals_while_a_process_starts():
+    # A recording handler stands in for the CLI's, so the test process is
+    # never exposed to SIGTERM's default disposition.
+    seen = []
+
+    def handler(_signum, _frame):
+        seen.append("handled")
+
+    previous = signal.signal(signal.SIGTERM, handler)
+    try:
+        with runner._stop_signals_held():
+            signal.raise_signal(signal.SIGTERM)
+            seen.append("process recorded")
+        assert seen == ["process recorded", "handled"]
+        assert signal.getsignal(signal.SIGTERM) is handler
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def test_sigterm_handling_is_scoped_to_the_command(monkeypatch):

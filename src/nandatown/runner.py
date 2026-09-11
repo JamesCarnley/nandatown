@@ -20,7 +20,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -86,6 +88,35 @@ def _spawn_participant(command: list[str], url: str, run_id: str, name: str,
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                             start_new_session=(os.name == "posix"))
+
+
+@contextmanager
+def _stop_signals_held():
+    """Hold SIGINT and SIGTERM until the block ends.
+
+    run_town starts each Town process and records it for cleanup inside
+    this block, so a stop signal cannot unwind run_town between the two and
+    leave that process running. A signal that arrives meanwhile is raised
+    again, for the handler that was in place, when the block ends. An
+    ignored signal stays ignored; outside the main thread, which alone can
+    set handlers, the block runs unguarded.
+    """
+    held: list[int] = []
+    saved: dict[int, Any] = {}
+    try:
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous = signal.getsignal(signum)
+                if previous is signal.SIG_IGN or previous is None:
+                    continue
+                saved[signum] = previous
+                signal.signal(signum, lambda s, _frame: held.append(s))
+        yield
+    finally:
+        for signum, previous in saved.items():
+            signal.signal(signum, previous)
+        for signum in dict.fromkeys(held):
+            signal.raise_signal(signum)
 
 
 def _stop_process(process: subprocess.Popen, grace: float = 0.5) -> int | None:
@@ -416,17 +447,20 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
     env = {key: os.environ[key] for key in _BUILTIN_ENV_KEYS
            if key in os.environ}
     env["TOWN_ADMIN_TOKEN"] = admin_token
-    coordinator = subprocess.Popen(
-        [sys.executable, "-m", "nandatown.coordinator", "--db", db_path,
-         "--port", str(port)],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=(os.name == "posix"),
-    )
-    procs: list[subprocess.Popen] = [coordinator]
     admin = httpx.Client(base_url=url, timeout=10.0,
                          headers={"X-Town-Admin": admin_token})
+    procs: list[subprocess.Popen] = []
     bundle_dir: str | None = None
     try:
+        with _stop_signals_held():
+            coordinator = subprocess.Popen(
+                [sys.executable, "-m", "nandatown.coordinator",
+                 "--db", db_path, "--port", str(port)],
+                env=env, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=(os.name == "posix"),
+            )
+            procs.append(coordinator)
         _wait_health(admin)
         keystore = None
         create_body: dict[str, Any] = {"profile": profile.model_dump()}
@@ -496,12 +530,13 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
             if seller_cmd is None:
                 hand_off("seller", seller_state)
                 return None
-            p = _spawn_participant(seller_cmd, url, run_id, "seller",
-                                   tokens["seller"], seller_state,
-                                   profile.fault, seller_deadline,
-                                   extra_env=seller_env,
-                                   inherit_env=(seller_kind == "cmd"))
-            procs.append(p)
+            with _stop_signals_held():
+                p = _spawn_participant(seller_cmd, url, run_id, "seller",
+                                       tokens["seller"], seller_state,
+                                       profile.fault, seller_deadline,
+                                       extra_env=seller_env,
+                                       inherit_env=(seller_kind == "cmd"))
+                procs.append(p)
             return p
 
         seller = spawn_seller()
@@ -509,12 +544,13 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
             hand_off("buyer", buyer_state)
             buyer = None
         else:
-            buyer = _spawn_participant(buyer_cmd, url, run_id, "buyer",
-                                       tokens["buyer"], buyer_state,
-                                       profile.fault, buyer_deadline,
-                                       extra_env=buyer_env,
-                                       inherit_env=(buyer_kind == "cmd"))
-            procs.append(buyer)
+            with _stop_signals_held():
+                buyer = _spawn_participant(buyer_cmd, url, run_id, "buyer",
+                                           tokens["buyer"], buyer_state,
+                                           profile.fault, buyer_deadline,
+                                           extra_env=buyer_env,
+                                           inherit_env=(buyer_kind == "cmd"))
+                procs.append(buyer)
 
         restarted = False
         refused_role: str | None = None
