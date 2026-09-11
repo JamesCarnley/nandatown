@@ -33,8 +33,16 @@ def build_handler(client: TownClient, journal: Journal):
             # Already applied: resend the original response (idempotent by
             # message identity, the town returns the original acceptance)
             # and say so, without applying again.
-            reply = journal.get(message_id)["reply"]
-            return "processed", {"duplicate": True}, [reply]
+            done = journal.get(message_id)
+            note = {"duplicate": True}
+            if journal.unreported(message_id):
+                # The application happened, but the acknowledgement that
+                # carried it was fenced, so the record still lacks it.
+                # Report the work actually done rather than let the
+                # evidence blame the seller for the lease timing.
+                note["applied"] = True
+                note["total_cents"] = done["total_cents"]
+            return "processed", note, [done["reply"]]
         body = claim["body"]
         total_cents = body["quantity"] * body["unit_price_cents"]
         reply = {
@@ -73,6 +81,27 @@ def crash_wrapper(client: TownClient, journal: Journal, state_dir: str,
     return handler
 
 
+def ack_outcome(journal: Journal):
+    """Track which applications the town has actually recorded.
+
+    An applied acknowledgement refused as a stale fence never reached
+    the evidence, so the application behind it stays unreported and the
+    next delivery of that work must carry it. An accepted one is in the
+    record, so it must never be claimed a second time.
+    """
+    def on_ack(claim: dict[str, Any], note: dict[str, Any],
+               accepted: bool) -> None:
+        message_id = claim["message_id"]
+        if not note.get("applied") or not journal.seen(message_id):
+            return
+        if accepted:
+            journal.clear_unreported(message_id)
+        else:
+            journal.mark_unreported(message_id, claim["fence"])
+
+    return on_ack
+
+
 def run(client: TownClient, name: str, token: str, state_dir: str,
         fault: str, deadline_seconds: float = 60.0,
         grant_json: str | None = None) -> int:
@@ -83,7 +112,8 @@ def run(client: TownClient, name: str, token: str, state_dir: str,
         lease = float(client.run_context.get("lease_seconds", 5.0))
         handler = crash_wrapper(client, journal, state_dir, lease, handler)
     deadline = time.time() + deadline_seconds
-    run_loop(client, handler, until=lambda: time.time() > deadline)
+    run_loop(client, handler, until=lambda: time.time() > deadline,
+             on_ack=ack_outcome(journal))
     return 0
 
 
