@@ -42,6 +42,7 @@ from .records import (
     RunRecord,
     StageResult,
     TownEvent,
+    canonical_json,
     fingerprint,
 )
 
@@ -85,6 +86,50 @@ def _strict_path_semantics(profile: PathProfile) -> bool:
 
 def _quote_intent_semantics(profile: PathProfile) -> bool:
     return profile.evaluator in QUOTE_INTENT_EVALUATORS
+
+
+# Subject values echoed into an event detail sit at most three containers
+# deep in an events.jsonl line (event, detail, quote). pydantic-core refuses
+# to write a line nested past about 255 levels and to read one back past
+# about 200, so a deeper echo left a partial bundle. 64 is far beyond any
+# meaningful quote field and keeps every line well inside both limits.
+MAX_ECHOED_NESTING = 64
+
+
+def _nesting_exceeds(value: Any, limit: int) -> bool:
+    """Whether value nests containers deeper than limit, without recursing."""
+    containers = (dict, list)
+    stack = [(value, 1)] if isinstance(value, containers) else []
+    while stack:
+        item, depth = stack.pop()
+        if depth > limit:
+            return True
+        children = item.values() if isinstance(item, dict) else item
+        stack.extend((child, depth + 1) for child in children
+                     if isinstance(child, containers))
+    return False
+
+
+def _echoed(value: Any) -> Any:
+    """A subject value as recorded in evidence: verbatim within the bound.
+
+    A deeper value becomes a marker that never equals an expected value, so
+    its stage fails instead of the bundle write crashing. The fulfillment's
+    content_digest still covers the full output.
+    """
+    if not _nesting_exceeds(value, MAX_ECHOED_NESTING):
+        return value
+    marker = {"unrecorded": "nesting too deep",
+              "type": "object" if isinstance(value, dict) else "array"}
+    try:
+        marker["json_length"] = len(canonical_json(value))
+        marker["fingerprint"] = fingerprint(value)
+    except RecursionError:
+        # Decoded just under the interpreter limit, re-serializing can need
+        # one frame more. The output is still the subject's, not a Town
+        # error: keep the marker without its digest.
+        marker.pop("json_length", None)
+    return marker
 
 
 def _quote_intent_errors(profile: PathProfile, detail: dict[str, Any]) -> list[str]:
@@ -338,12 +383,13 @@ def run_path_test(subject_url: str | None, out_dir: str,
                         continue
                     detail = {
                         "attempt": attempt,
-                        "total_cents": fulfillment.get("total_cents"),
-                        "request_id": fulfillment.get("request_id"),
+                        "total_cents": _echoed(fulfillment.get("total_cents")),
+                        "request_id": _echoed(fulfillment.get("request_id")),
                         "content_digest": content_digest}
                     if _quote_intent_semantics(profile):
                         detail["quote"] = {
-                            field: fulfillment[field] for field in QUOTE_INTENT_FIELDS
+                            field: _echoed(fulfillment[field])
+                            for field in QUOTE_INTENT_FIELDS
                             if field in fulfillment}
                     recorder.emit(
                         "town-requester", "fulfillment_observed",

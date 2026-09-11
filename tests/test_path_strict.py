@@ -51,8 +51,21 @@ def _quote(order):
     }
 
 
+def _quote_text(order, raw_fields):
+    """Serialize the quote with raw JSON text spliced in for chosen fields.
+
+    Splicing sends JSON nested deeper than json.dumps can build from inside
+    the transport's call stack.
+    """
+    quote = {key: value for key, value in _quote(order).items()
+             if key not in raw_fields}
+    spliced = "".join(f", {json.dumps(key)}: {raw}"
+                      for key, raw in raw_fields.items())
+    return json.dumps(quote)[:-1] + spliced + "}"
+
+
 def shaped_client(*, state="completed", second_state=None, layout="single",
-                  raw_status=MISSING, raw_text=MISSING):
+                  raw_status=MISSING, raw_text=MISSING, raw_fields=None):
     attempts = 0
 
     def handle(request):
@@ -64,7 +77,7 @@ def shaped_client(*, state="completed", second_state=None, layout="single",
         order = json.loads(
             envelope["params"]["message"]["parts"][0]["text"])
         first = {"kind": "text", "text": raw_text if raw_text is not MISSING
-                 else json.dumps(_quote(order))}
+                 else _quote_text(order, raw_fields or {})}
         extra = {"kind": "text", "text": json.dumps({"hidden": True})}
         selected_layout = (
             "multiple_artifacts"
@@ -378,6 +391,118 @@ def test_legacy_profile_keeps_recorded_undecodable_output_events(tmp_path):
                  and e.detail["attempt"] == 1]
     assert [e.detail["ok"] for e in exchanges] == [True, False]
     assert not any(e.kind == "fulfillment_unparseable" for e in events)
+    assert verify_bundle(directory) == []
+
+
+LEGACY_PRICE_PROFILE = "a2a-capability-fulfillment@0.2"
+LEGACY_QUOTE_PROFILE = "a2a-quote-intent@0.1"
+
+
+def _nested_array(depth):
+    value = []
+    for _ in range(depth - 1):
+        value = [value]
+    return value
+
+
+def _echoed_value(event, field):
+    if field in path_profiles.QUOTE_INTENT_FIELDS:
+        return event.detail["quote"][field]
+    return event.detail[field]
+
+
+ECHOED_FIELDS = [
+    (STRICT_PRICE_PROFILE, "total_cents"),
+    (STRICT_PRICE_PROFILE, "request_id"),
+    (LEGACY_PRICE_PROFILE, "total_cents"),
+    (LEGACY_PRICE_PROFILE, "request_id"),
+    (STRICT_QUOTE_PROFILE, "sku"),
+    (STRICT_QUOTE_PROFILE, "total_cents"),
+    (LEGACY_QUOTE_PROFILE, "sku"),
+    (LEGACY_QUOTE_PROFILE, "request_id"),
+]
+
+
+@pytest.mark.parametrize("depth", [65, 210, 300, 900])
+@pytest.mark.parametrize("profile_ref, field", ECHOED_FIELDS)
+def test_deeply_nested_echoed_field_is_recorded_as_marker_and_fails(
+        tmp_path, profile_ref, field, depth):
+    """Nesting the bundle writer cannot store must not crash the run."""
+    directory, result = _run(tmp_path, profile_ref,
+                             raw_fields={field: "[" * depth + "]" * depth})
+
+    assert _stage(result, "protocol_invocation").status == "passed"
+    assert _stage(result, "semantic_result").status == "failed"
+    assert result.verdict == "failed"
+    events = load_bundle(directory)["events"]
+    kinds = [event.kind for event in events]
+    assert "town_driver_error" not in kinds
+    assert "fulfillment_unparseable" not in kinds
+    observed = [event for event in events
+                if event.kind == "fulfillment_observed"]
+    assert observed
+    for event in observed:
+        assert _echoed_value(event, field) == {
+            "unrecorded": "nesting too deep",
+            "type": "array",
+            "json_length": 2 * depth,
+            "fingerprint": fingerprint(_nested_array(depth)),
+        }
+        assert event.detail["content_digest"].startswith("sha256:")
+    assert verify_bundle(directory) == []
+    assert (Path(directory) / "attestation.json").is_file()
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ('{"a": 1}', {"a": 1}),
+    ("[" * 64 + "]" * 64, _nested_array(64)),
+], ids=["shallow-object", "at-nesting-bound"])
+@pytest.mark.parametrize("profile_ref, field", [
+    (LEGACY_PRICE_PROFILE, "total_cents"),
+    (STRICT_PRICE_PROFILE, "total_cents"),
+    (LEGACY_QUOTE_PROFILE, "sku"),
+    (STRICT_QUOTE_PROFILE, "sku"),
+])
+def test_nested_echoed_field_within_bound_is_recorded_verbatim(
+        tmp_path, profile_ref, field, raw, expected):
+    directory, result = _run(tmp_path, profile_ref,
+                             raw_fields={field: raw})
+
+    observed = [event for event in load_bundle(directory)["events"]
+                if event.kind == "fulfillment_observed"]
+    assert observed
+    assert all(_echoed_value(event, field) == expected
+               for event in observed)
+    assert _stage(result, "semantic_result").status == "failed"
+    assert verify_bundle(directory) == []
+
+
+def test_marker_drops_digest_when_reserializing_exhausts_recursion(
+        tmp_path, monkeypatch):
+    """Output decoded just under the interpreter limit stays the subject's.
+
+    Re-serializing one echoed field can need a frame more than decoding
+    did; that must not become a Town error.
+    """
+    import nandatown.path_runner as path_runner
+
+    def exhausted(value):
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(path_runner, "canonical_json", exhausted)
+    directory, result = _run(tmp_path, STRICT_QUOTE_PROFILE,
+                             raw_fields={"sku": "[" * 65 + "]" * 65})
+
+    assert _stage(result, "semantic_result").status == "failed"
+    assert result.verdict == "failed"
+    events = load_bundle(directory)["events"]
+    assert "town_driver_error" not in [event.kind for event in events]
+    observed = [event for event in events
+                if event.kind == "fulfillment_observed"]
+    assert observed
+    assert all(_echoed_value(event, "sku") == {
+        "unrecorded": "nesting too deep", "type": "array"}
+        for event in observed)
     assert verify_bundle(directory) == []
 
 
