@@ -317,6 +317,98 @@ def test_cli_malformed_index_writes_failed_resolution_bundle(tmp_path,
     assert verify_bundle(bundle_dir) == []
 
 
+INVALID_URL_REASON = "invalid endpoint URL: expected an absolute http(s) URL"
+INVALID_INDEX_URL_REASON = ('malformed index: the entry "url" must be an'
+                            " absolute http(s) URL")
+UNUSABLE_URLS = [
+    pytest.param("   ", id="blank"),
+    pytest.param(" http://127.0.0.1:9", id="leading-space"),
+    pytest.param("https://agent.example ", id="trailing-space"),
+    pytest.param("http://127.0.0.1:9\n", id="trailing-newline"),
+    pytest.param("http://not a url", id="space-in-host"),
+    pytest.param("not a url", id="not-a-url"),
+    pytest.param("file:///etc/hosts", id="file-scheme"),
+    pytest.param("ftp://agent.example", id="ftp-scheme"),
+    pytest.param("//agent.example", id="no-scheme"),
+    pytest.param("http://", id="no-host"),
+    pytest.param("http://[::1", id="unparseable"),
+    pytest.param("http://" + "a" * 1_000_000, id="one-megabyte"),
+]
+USABLE_URLS = ["http://10.0.0.5:8940", "https://agent.example",
+               "http://127.0.0.1:9", "http://[::1]:8940",
+               "https://agent.example:8443/a2a/"]
+
+
+def _assert_resolution_refused(bundle_dir, result, reason, problems=()):
+    resolution = stage(result, "resolution")
+    assert resolution.status == "failed"
+    assert resolution.note == reason
+    assert stage(result, "agent_card_retrieval").status == "not_tested"
+    assert result.verdict == "failed"
+    kinds = [event.kind for event in load_bundle(bundle_dir)["events"]]
+    assert "card_fetch_failed" not in kinds
+    assert "card_retrieved" not in kinds
+    assert verify_bundle(bundle_dir) == list(problems)
+
+
+@pytest.mark.parametrize("url", UNUSABLE_URLS)
+def test_unusable_url_fails_resolution_not_card_retrieval(tmp_path, url):
+    """An unusable locator is the operator's, not the agent's, failure."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"),
+                                       http=client())
+
+    # A blank --url is also recorded as the run's participant name, which
+    # verify rejects on its own; that run record is outside resolution.
+    problems = ([] if url.strip()
+                else ["run participant 1 has no valid name"])
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON,
+                               problems)
+
+
+@pytest.mark.parametrize("url", UNUSABLE_URLS)
+def test_unusable_index_url_fails_resolution_not_card_retrieval(tmp_path,
+                                                               url):
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": url}}}))
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name="maya-seller", http=client())
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_INDEX_URL_REASON)
+
+
+@pytest.mark.parametrize("url", [
+    pytest.param("http://127.0.0.1:9\n", id="trailing-newline"),
+    pytest.param("http://" + "a" * 1_000_000, id="one-megabyte"),
+])
+def test_url_httpx_rejects_fails_resolution_without_traceback(tmp_path,
+                                                             url):
+    """Without an injected client these reached httpx and raised."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"))
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+
+
+@pytest.mark.parametrize("via", ["url", "index"])
+@pytest.mark.parametrize("url", USABLE_URLS)
+def test_any_absolute_http_url_passes_resolution(tmp_path, url, via):
+    """Loopback, LAN and remote endpoints are all valid subjects."""
+    kwargs = {}
+    subject = url
+    if via == "index":
+        index = tmp_path / "index.json"
+        index.write_text(json.dumps({"agents": {"maya-seller": {"url": url}}}))
+        kwargs = {"index_file": str(index), "agent_name": "maya-seller"}
+        subject = None
+
+    _, result = run_path_test(subject, str(tmp_path / "runs"),
+                              http=client(), **kwargs)
+
+    assert stage(result, "resolution").status == "passed"
+    assert stage(result, "agent_card_retrieval").status == "passed"
+
+
 def test_town_driver_fault_is_an_error_not_a_failure(tmp_path,
                                                      monkeypatch):
     import nandatown.a2a_adapter as a2a

@@ -169,9 +169,29 @@ class _Recorder:
             "action": action, "payload": payload})
 
 
+def _is_endpoint_url(value: object) -> bool:
+    """Whether httpx parses value as an absolute http(s) URL with a host.
+
+    Any host and port is accepted: loopback, LAN and remote agents are all
+    valid subjects. Raw whitespace is refused because httpx would drop it
+    or percent-encode it into a different endpoint.
+    """
+    if not isinstance(value, str) or any(ch.isspace() for ch in value):
+        return False
+    try:
+        parsed = httpx.URL(value)
+    except httpx.InvalidURL:
+        return False
+    return parsed.scheme in ("http", "https") and bool(parsed.host)
+
+
 def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
              agent_name: str | None) -> tuple[str | None, str | None]:
-    """Returns (subject_url, pinned_card_digest_from_index)."""
+    """Returns (subject_url, pinned_card_digest_from_index).
+
+    A locator Town cannot use fails resolution here, so it is never charged
+    to the agent's card retrieval.
+    """
     if index_file:
         recorder.intend("town-requester", "resolve",
                         {"index": index_file, "agent": agent_name})
@@ -205,6 +225,9 @@ def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
         if not isinstance(entry["url"], str) or not entry["url"]:
             return fail('malformed index: the entry "url" must be a'
                         " non-empty string")
+        if not _is_endpoint_url(entry["url"]):
+            return fail('malformed index: the entry "url" must be an'
+                        " absolute http(s) URL")
         digest = entry.get("card_digest")
         if digest is not None and (not isinstance(digest, str)
                                    or not digest):
@@ -218,6 +241,11 @@ def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
                        "url": entry["url"]})
         return entry["url"], entry.get("card_digest")
     recorder.intend("town-requester", "resolve", {"url": url})
+    if not _is_endpoint_url(url):
+        recorder.emit("town-requester", "resolution_failed", url or "?",
+                      {"reason": "invalid endpoint URL: expected an"
+                                 " absolute http(s) URL"})
+        return None, None
     recorder.emit("town-requester", "resolution_hop", url or "?",
                   {"kind": "direct", "url": url})
     return url, None
