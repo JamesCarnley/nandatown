@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from nandatown.bundle import load_bundle, verify_bundle, write_bundle
 from nandatown.cli import main
 from nandatown.coordinator import build_app
-from nandatown.evaluator import evaluate
+from nandatown.evaluator import EVALUATOR_VERSION, evaluate
 from nandatown.records import RunRecord, TestProfile, fingerprint
 from nandatown.report import render_report
 
@@ -452,7 +452,9 @@ def write_quote_bundle(tmp_path, events):
         profile_fingerprint=fingerprint(p.model_dump()), created_at=1.0,
         participants=[{"name": "buyer", "role": "buyer"},
                       {"name": "seller", "role": "seller"}],
-        releases={"nandatown": "0.2.0", "evaluator": "0.2.0",
+        # The evaluator release must follow whichever evaluator writes the
+        # result, or verify reports a release mismatch after a version bump.
+        releases={"nandatown": "0.2.0", "evaluator": EVALUATOR_VERSION,
                   "python": "3.11"})
     out = str(tmp_path / "bundle")
     write_bundle(out, p, run, [], events,
