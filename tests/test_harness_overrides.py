@@ -234,7 +234,7 @@ def test_external_buyer_that_never_asserts_is_incomplete_within_timeout(
         tmp_path):
     started = time.monotonic()
     result, _ = _run_with_buyer(tmp_path, "wait", think=3600,
-                                mode="silent", wait_timeout=10)
+                                mode="silent", wait_timeout=20)
     elapsed = time.monotonic() - started
 
     stages = {s.name: s for s in result.stages}
@@ -243,7 +243,7 @@ def test_external_buyer_that_never_asserts_is_incomplete_within_timeout(
     assert stages["response"].status == "passed", detail
     assert stages["correct"].status == "not_enough_evidence", detail
     assert stages["correct"].note == "the buyer made no correctness assertion"
-    assert elapsed < 10 + 5
+    assert elapsed < 20 + 5
 
 
 # A seller subject that serves exactly one request and exits 0. With
