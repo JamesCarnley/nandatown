@@ -88,11 +88,12 @@ def _quote_intent_semantics(profile: PathProfile) -> bool:
     return profile.evaluator in QUOTE_INTENT_EVALUATORS
 
 
-# Subject values echoed into an event detail sit at most three containers
-# deep in an events.jsonl line (event, detail, quote). pydantic-core refuses
-# to write a line nested past about 255 levels and to read one back past
-# about 200, so a deeper echo left a partial bundle. 64 is far beyond any
-# meaningful quote field and keeps every line well inside both limits.
+# Subject values echoed into an event detail (card name and version, task
+# id, kind and state, fulfillment fields) sit at most three containers deep
+# in an events.jsonl line (event, detail, quote). pydantic-core refuses to
+# write a line nested past about 255 levels and to read one back past about
+# 200, so a deeper echo left a partial bundle. 64 is far beyond any
+# meaningful field and keeps every line well inside both limits.
 MAX_ECHOED_NESTING = 64
 
 
@@ -113,9 +114,11 @@ def _nesting_exceeds(value: Any, limit: int) -> bool:
 def _echoed(value: Any) -> Any:
     """A subject value as recorded in evidence: verbatim within the bound.
 
-    A deeper value becomes a marker that never equals an expected value, so
-    its stage fails instead of the bundle write crashing. The fulfillment's
-    content_digest still covers the full output.
+    A deeper value becomes a marker instead of crashing the bundle write.
+    Like the value, the marker is truthy and never equals anything a stage
+    expects (a task kind, a terminal state, a quote term), so the recorded
+    evidence evaluates as the value would have. The card digest and the
+    fulfillment's content_digest still cover the full value.
     """
     if not _nesting_exceeds(value, MAX_ECHOED_NESTING):
         return value
@@ -284,8 +287,8 @@ def run_path_test(subject_url: str | None, out_dir: str,
                 observed_digest = fingerprint(card)
                 recorder.emit("town-requester", "card_retrieved", url,
                               {"digest": observed_digest,
-                               "name": card.get("name"),
-                               "version": card.get("version")})
+                               "name": _echoed(card.get("name")),
+                               "version": _echoed(card.get("version"))})
                 card_ok = True
                 if pinned:
                     recorder.emit("town-requester", "descriptor_expected",
@@ -319,9 +322,9 @@ def run_path_test(subject_url: str | None, out_dir: str,
                     exchange_detail = {
                         "attempt": attempt,
                         "ok": True,
-                        "task_id": task.get("id"),
-                        "kind": task.get("kind"),
-                        "state": state,
+                        "task_id": _echoed(task.get("id")),
+                        "kind": _echoed(task.get("kind")),
+                        "state": _echoed(state),
                     }
                     terminal_outputs = None
                     if strict_semantics:

@@ -51,26 +51,35 @@ def _quote(order):
     }
 
 
-def _quote_text(order, raw_fields):
-    """Serialize the quote with raw JSON text spliced in for chosen fields.
+def _splice(obj, raw_fields):
+    """Serialize obj with raw JSON text spliced in for chosen fields.
 
     Splicing sends JSON nested deeper than json.dumps can build from inside
     the transport's call stack.
     """
-    quote = {key: value for key, value in _quote(order).items()
-             if key not in raw_fields}
+    kept = {key: value for key, value in obj.items()
+            if key not in raw_fields}
     spliced = "".join(f", {json.dumps(key)}: {raw}"
                       for key, raw in raw_fields.items())
-    return json.dumps(quote)[:-1] + spliced + "}"
+    return json.dumps(kept)[:-1] + spliced + "}"
+
+
+def _quote_text(order, raw_fields):
+    """Serialize the quote with raw JSON text spliced in for chosen fields."""
+    return _splice(_quote(order), raw_fields)
 
 
 def shaped_client(*, state="completed", second_state=None, layout="single",
-                  raw_status=MISSING, raw_text=MISSING, raw_fields=None):
+                  raw_status=MISSING, raw_text=MISSING, raw_fields=None,
+                  raw_task_fields=None, raw_card_fields=None):
     attempts = 0
 
     def handle(request):
         nonlocal attempts
         if request.method == "GET":
+            if raw_card_fields:
+                return httpx.Response(200, content=_splice(
+                    build_agent_card(SUBJECT), raw_card_fields).encode())
             return httpx.Response(200, json=build_agent_card(SUBJECT))
         attempts += 1
         envelope = json.loads(request.content)
@@ -102,6 +111,11 @@ def shaped_client(*, state="completed", second_state=None, layout="single",
             },
             "artifacts": artifacts,
         }
+        if raw_task_fields:
+            return httpx.Response(200, content=(
+                '{"jsonrpc": "2.0", "id": ' + json.dumps(envelope["id"])
+                + ', "result": ' + _splice(task, raw_task_fields)
+                + "}").encode())
         return httpx.Response(200, json={
             "jsonrpc": "2.0", "id": envelope["id"], "result": task,
         })
@@ -504,6 +518,112 @@ def test_marker_drops_digest_when_reserializing_exhausts_recursion(
         "unrecorded": "nesting too deep", "type": "array"}
         for event in observed)
     assert verify_bundle(directory) == []
+
+
+ECHO_PROFILES = [LEGACY_PRICE_PROFILE, STRICT_PRICE_PROFILE,
+                 LEGACY_QUOTE_PROFILE, STRICT_QUOTE_PROFILE]
+# Where each subject value is echoed: (event kind, detail key) and the
+# shaped_client splice that sends it nested.
+TASK_AND_CARD_ECHOES = {
+    "task_id": ("protocol_exchange", "task_id",
+                lambda raw: {"raw_task_fields": {"id": raw}}),
+    "task_kind": ("protocol_exchange", "kind",
+                  lambda raw: {"raw_task_fields": {"kind": raw}}),
+    "task_state": ("protocol_exchange", "state",
+                   lambda raw: {"raw_task_fields": {
+                       "status": '{"state": ' + raw + "}"}}),
+    "card_name": ("card_retrieved", "name",
+                  lambda raw: {"raw_card_fields": {"name": raw}}),
+    "card_version": ("card_retrieved", "version",
+                     lambda raw: {"raw_card_fields": {"version": raw}}),
+}
+
+
+def _deep(depth):
+    return "[" * depth + "]" * depth
+
+
+def _marker(depth):
+    return {"unrecorded": "nesting too deep", "type": "array",
+            "json_length": 2 * depth,
+            "fingerprint": fingerprint(_nested_array(depth))}
+
+
+def _run_echo(tmp_path, profile_ref, echo, depth):
+    kind, key, shape = TASK_AND_CARD_ECHOES[echo]
+    directory, result = _run(tmp_path, profile_ref, **shape(_deep(depth)))
+    events = load_bundle(directory)["events"]
+    assert "town_driver_error" not in [event.kind for event in events]
+    recorded = [event.detail[key] for event in events
+                if event.kind == kind and key in event.detail]
+    assert recorded
+    assert verify_bundle(directory) == []
+    assert (Path(directory) / "attestation.json").is_file()
+    return result, recorded
+
+
+@pytest.mark.parametrize("depth", [65, 300, 900])
+@pytest.mark.parametrize("echo", list(TASK_AND_CARD_ECHOES))
+@pytest.mark.parametrize("profile_ref", ECHO_PROFILES)
+def test_deeply_nested_task_or_card_value_is_recorded_as_marker(
+        tmp_path, profile_ref, echo, depth):
+    """A nested task id, kind, state or card name must not crash the run.
+
+    The marker is evaluated as the value itself would be: the stage
+    statuses and verdict match the same run with a value within the bound.
+    """
+    within, _ = _run_echo(tmp_path / "within", profile_ref, echo, 64)
+    result, recorded = _run_echo(tmp_path / "deep", profile_ref, echo, depth)
+
+    assert recorded == [_marker(depth)] * len(recorded)
+    assert [(s.name, s.status) for s in result.stages] \
+        == [(s.name, s.status) for s in within.stages]
+    assert result.verdict == within.verdict
+    assert result.verdict != "error"
+
+
+@pytest.mark.parametrize("echo", list(TASK_AND_CARD_ECHOES))
+@pytest.mark.parametrize("profile_ref", ECHO_PROFILES)
+def test_nested_task_or_card_value_within_bound_is_recorded_verbatim(
+        tmp_path, profile_ref, echo):
+    _, recorded = _run_echo(tmp_path, profile_ref, echo, 64)
+
+    assert recorded == [_nested_array(64)] * len(recorded)
+
+
+@pytest.mark.parametrize("profile_ref", ECHO_PROFILES)
+def test_deeply_nested_task_kind_fails_invocation_as_the_subjects(
+        tmp_path, profile_ref):
+    result, _ = _run_echo(tmp_path, profile_ref, "task_kind", 300)
+
+    invocation = _stage(result, "protocol_invocation")
+    assert invocation.status == "failed"
+    assert invocation.note == "the response was not a well-formed task"
+    assert result.verdict == "failed"
+
+
+@pytest.mark.parametrize("profile_ref", [STRICT_PRICE_PROFILE,
+                                         STRICT_QUOTE_PROFILE])
+def test_deeply_nested_task_state_fails_strict_invocation(tmp_path,
+                                                          profile_ref):
+    result, _ = _run_echo(tmp_path, profile_ref, "task_state", 300)
+
+    invocation = _stage(result, "protocol_invocation")
+    assert invocation.status == "failed"
+    assert invocation.note.startswith(
+        "expected successful terminal task state 'completed', observed {")
+    assert _stage(result, "semantic_result").status == "not_tested"
+    assert result.verdict == "failed"
+
+
+def test_deeply_nested_card_name_keeps_the_full_card_digest(tmp_path):
+    card_text = _splice(build_agent_card(SUBJECT), {"name": _deep(300)})
+    _run_echo(tmp_path, STRICT_PRICE_PROFILE, "card_name", 300)
+
+    directory = next(Path(tmp_path).iterdir())
+    retrieved = next(event for event in load_bundle(directory)["events"]
+                     if event.kind == "card_retrieved")
+    assert retrieved.detail["digest"] == fingerprint(json.loads(card_text))
 
 
 def test_strict_malformed_status_is_subject_failure_not_town_error(tmp_path):
