@@ -670,9 +670,11 @@ def _call_stopping_on_sigterm(func, args: argparse.Namespace) -> int:
     Python's default SIGTERM disposition ends the process without running
     ``finally`` blocks, which would orphan the coordinator run_town started
     in its own session (a CI job timeout, for example). Raising SystemExit
-    instead runs that cleanup and exits 143 (128 + SIGTERM), the status a
-    shell reports for a SIGTERM stop. Non-POSIX platforms, calls from other
-    threads, and an ignored or already-handled SIGTERM keep their behavior.
+    instead runs that cleanup; the process then raises SIGTERM again under
+    the default disposition, so its parent still sees it killed by signal
+    15, much as CPython ends by SIGINT after an unhandled KeyboardInterrupt.
+    Non-POSIX platforms, calls from other threads, and an ignored or
+    already-handled SIGTERM keep their behavior.
     """
     import os
     import signal
@@ -683,10 +685,13 @@ def _call_stopping_on_sigterm(func, args: argparse.Namespace) -> int:
             or signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL):
         return func(args)
 
+    received: list[int] = []
+
     def stop(signum, _frame):
         # A repeated SIGTERM must not interrupt the cleanup this starts;
         # SIGKILL still stops the process at once.
         signal.signal(signum, signal.SIG_IGN)
+        received.append(signum)
         raise SystemExit(128 + signum)
 
     signal.signal(signal.SIGTERM, stop)
@@ -694,6 +699,16 @@ def _call_stopping_on_sigterm(func, args: argparse.Namespace) -> int:
         return func(args)
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        if received:
+            # The cleanup has run; end the way SIGTERM always ended this
+            # process. Should the signal somehow not end it, the command's
+            # own outcome, normally SystemExit(143), stands.
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.flush()
+                except (AttributeError, OSError, ValueError):
+                    pass
+            signal.raise_signal(signal.SIGTERM)
 
 
 def main(argv: list[str] | None = None) -> int:
