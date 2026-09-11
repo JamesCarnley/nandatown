@@ -13,6 +13,7 @@ assertions.
 
 from __future__ import annotations
 
+import math
 import os
 import secrets
 import signal
@@ -32,6 +33,40 @@ from .records import RunRecord, TestProfile, TownEvent, fingerprint
 from .profiles import PROFILES
 
 SELLER_CRASH_EXIT = 3
+
+# Town's stock participants get a DEADLINE carved out of the run's wait
+# timeout: the seller stops SELLER_DEADLINE_MARGIN seconds before the
+# runner does and the buyer BUYER_DEADLINE_MARGIN seconds before, so the
+# seller is still serving while the buyer waits and the runner outlives
+# both.
+SELLER_DEADLINE_MARGIN = 5.0
+BUYER_DEADLINE_MARGIN = 15.0
+# The least time left to the stock buyer, the counterpart with the shorter
+# DEADLINE, to request, receive and check a quote: one default lease. The
+# slowest stock profile, quote-crash-restart, takes about 3.5 s end to
+# end. Any shorter wait timeout would starve Town's own counterpart and
+# report the agent under test INCOMPLETE for it, so it is refused.
+MIN_BUYER_BUDGET = 5.0
+MIN_WAIT_TIMEOUT = BUYER_DEADLINE_MARGIN + MIN_BUYER_BUDGET  # 20 s
+
+
+def check_wait_timeout(wait_timeout: float,
+                       name: str = "wait_timeout") -> None:
+    """Refuse a wait timeout that cannot make a valid Track run.
+
+    Raises ValueError naming MIN_WAIT_TIMEOUT. NaN and infinity are
+    refused too: neither bounds the run.
+    """
+    if not math.isfinite(wait_timeout):
+        raise ValueError(f"{name} {wait_timeout} is not a usable number of"
+                         f" seconds; give at least {MIN_WAIT_TIMEOUT:g} s")
+    if wait_timeout < MIN_WAIT_TIMEOUT:
+        raise ValueError(
+            f"{name} {wait_timeout:g} s is too short: Town's stock buyer"
+            f" stops {BUYER_DEADLINE_MARGIN:g} s before the run does and"
+            f" needs {MIN_BUYER_BUDGET:g} s to request and check a quote,"
+            f" so give at least {MIN_WAIT_TIMEOUT:g} s")
+
 
 _BUILTIN_ENV_KEYS = (
     "PATH", "PYTHONPATH", "PYTHONHOME",
@@ -403,6 +438,7 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
                           f" choose from {sorted(PROFILES)}")
     profile = PROFILES[profile_name]
     _validate_role_overrides(profile, harnesses, external)
+    check_wait_timeout(wait_timeout)
     model = model or os.environ.get("TOWN_MODEL", "mock:v1")
     admin_token = secrets.token_hex(16)
     port = port or _free_port()
@@ -475,8 +511,8 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
         if "buyer" in grants:
             buyer_env["TOWN_GRANT"] = grants["buyer"]
 
-        seller_deadline = str(wait_timeout - 5)
-        buyer_deadline = str(wait_timeout - 15)
+        seller_deadline = str(wait_timeout - SELLER_DEADLINE_MARGIN)
+        buyer_deadline = str(wait_timeout - BUYER_DEADLINE_MARGIN)
 
         def hand_off(role: str, state_dir: str) -> None:
             """Credentials for an agent that joins from outside: the same
