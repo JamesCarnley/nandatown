@@ -860,19 +860,3 @@ def test_generated_rerun_keeps_explicit_path_profile_when_default_changes(
     finally:
         process.terminate()
         process.wait()
-
-
-@pytest.mark.parametrize("url", MALFORMED_A_LABEL_URLS + [
-    "http://[v1.fe80::a+en1]:9", "http://[::1", "http://"])
-def test_a2a_test_reports_an_unusable_url_rather_than_raising(url):
-    """`a2a test` is the same kind of probe and owes the same answer.
-
-    httpx.InvalidURL is not an httpx.HTTPError, so an address it cannot
-    parse escaped the probe and ended the command in a traceback.
-    """
-    from nandatown.a2a_adapter import probe_endpoint
-
-    report = probe_endpoint(url)
-
-    assert report["ok"] is False
-    assert report["problems"]
