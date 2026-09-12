@@ -344,7 +344,7 @@ def test_recorded_0_2_0_rules_are_unchanged():
     assert legacy.evaluator_version == "0.2.0"
     assert legacy.verdict == "passed"
     current = evaluate(profile(), "run-1", second_response_events())
-    assert current.evaluator_version == EVALUATOR_VERSION == "0.3.0"
+    assert current.evaluator_version == EVALUATOR_VERSION != "0.2.0"
     assert current.verdict == "failed"
 
 

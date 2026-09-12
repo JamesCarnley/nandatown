@@ -22,12 +22,17 @@ from .records import (
     json_type,
 )
 
-EVALUATOR_VERSION = "0.3.0"
+EVALUATOR_VERSION = "0.4.0"
 # Recorded bundles replay under the rules that produced them. 0.2.0 took
 # the first accepted quote response; it neither counted responses nor
-# checked which request a response named.
+# checked which request a response named. 0.3.0 added those checks but
+# read any truthy acknowledgement flag as a yes, and judged only the
+# first accepted request.
 LEGACY_EVALUATOR_VERSION = "0.2.0"
-EVALUATOR_VERSIONS = (LEGACY_EVALUATOR_VERSION, EVALUATOR_VERSION)
+CORRELATION_EVALUATOR_VERSION = "0.3.0"
+EVALUATOR_VERSIONS = (LEGACY_EVALUATOR_VERSION,
+                      CORRELATION_EVALUATOR_VERSION,
+                      EVALUATOR_VERSION)
 
 REQUEST_KIND = "quote_request"
 RESPONSE_KIND = "quote_response"
@@ -109,6 +114,37 @@ def _response_mismatch(responses: list[TownEvent],
                       f" request is {accepted}")
 
 
+def _asserted(note: object, field: str) -> bool | None:
+    """The boolean a participant asserted for field, or None for no
+    assertion this evaluator can read.
+
+    A flag counts only when it is a boolean. Anything else says nothing
+    about the work: read as truthiness, the string "false" and the
+    number 1 both mean yes, which is how a participant could deny doing
+    something and be recorded as having done it.
+    """
+    if not isinstance(note, dict):
+        return None
+    value = note.get(field)
+    return value if isinstance(value, bool) else None
+
+
+def _unreadable_flags(acks: list[TownEvent], field: str) -> list[TownEvent]:
+    """Acknowledgements that state field as something other than a
+    boolean. Their authors meant to say something; the note says what
+    was recorded so an operator can see what to fix."""
+    return [a for a in acks
+            if isinstance(a.detail.get("note"), dict)
+            and field in a.detail["note"]
+            and not isinstance(a.detail["note"][field], bool)]
+
+
+def _flag_note(acks: list[TownEvent], field: str, what: str) -> str:
+    shown = _show_value(acks[0].detail["note"][field])
+    return (f"{what} records {field} as {shown}, which is not a boolean"
+            " and states nothing about the work")
+
+
 def _show_value(value: object) -> str:
     """A recorded value for a stage note: its JSON text when short (JSON
     null for null), otherwise its first NOTE_VALUE_CHARS characters, its
@@ -142,6 +178,9 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
              version: str = EVALUATOR_VERSION) -> EvidenceResult:
     if version not in EVALUATOR_VERSIONS:
         raise ValueError(f"unsupported Track evaluator version {version!r}")
+    # Only the current rules require a flag to be a boolean. Earlier ones
+    # read truthiness, and a bundle they recorded still replays that way.
+    strict_flags = version == EVALUATOR_VERSION
     seller = next((n for n, r in profile.roles.items() if r == "seller"), "seller")
     buyer = next((n for n, r in profile.roles.items() if r == "buyer"), "buyer")
 
@@ -196,11 +235,21 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
 
     # processed: the seller applied the task exactly once on its own side.
     processed = [a for a in seller_acks if a.detail.get("status") == "processed"]
-    applied = [a for a in processed if a.detail.get("note", {}).get("applied")]
+    applied = [a for a in processed
+               if (_asserted(a.detail.get("note"), "applied") is True
+                   if strict_flags
+                   else a.detail.get("note", {}).get("applied"))]
+    unreadable = (_unreadable_flags(processed, "applied") if strict_flags
+                  else [])
     if not processed:
         stages.append(_missing("processed", "no processed acknowledgement"))
     elif len(applied) == 1:
         stages.append(_passed("processed", [applied[0].event_id]))
+    elif len(applied) == 0 and unreadable:
+        stages.append(_missing(
+            "processed",
+            _flag_note(unreadable, "applied",
+                       "a processed acknowledgement")))
     elif len(applied) == 0:
         stages.append(_missing("processed",
                                "processed acknowledgements carry no"
@@ -243,7 +292,18 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                                     subject=r.subject)]
     verdict_acks = [a for a in buyer_acks
                     if "correct" in a.detail.get("note", {})]
-    if verdict_acks and mismatch is not None and mismatch[0] == "failed":
+    unreadable_verdicts = (_unreadable_flags(verdict_acks, "correct")
+                           if strict_flags else [])
+    if strict_flags:
+        verdict_acks = [a for a in verdict_acks
+                        if _asserted(a.detail.get("note"), "correct")
+                        is not None]
+    if not verdict_acks and unreadable_verdicts:
+        stages.append(_missing(
+            "correct",
+            _flag_note(unreadable_verdicts, "correct",
+                       "the buyer's acknowledgement")))
+    elif verdict_acks and mismatch is not None and mismatch[0] == "failed":
         stages.append(_failed(
             "correct", [a.event_id for a in verdict_acks],
             "the buyer's assertion cannot establish the answer to the"
@@ -293,7 +353,9 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
     elif fault == "duplicate_delivery":
         offered = find("duplicate_offered")
         recognized = [a for a in seller_acks
-                      if a.detail.get("note", {}).get("duplicate")]
+                      if (_asserted(a.detail.get("note"), "duplicate") is True
+                          if strict_flags
+                          else a.detail.get("note", {}).get("duplicate"))]
         if offered and recognized and len(applied) == 1:
             stages.append(_passed("duplicate_recognized",
                                   [offered[0].event_id,

@@ -190,7 +190,11 @@ Path evaluators are versioned. Replay a `path-0.1` bundle with its matching
 than treating the bundle as corrupt. The bundle's existing signature remains
 valid for its recorded bytes.
 
-The Track evaluator is `0.3.0`. Its `response` stage requires exactly one
+The Track evaluator is `0.4.0`. It reads an acknowledgement flag only when
+it is a JSON boolean: `applied`, `correct` and `duplicate` given as a string,
+a number or anything else state nothing about the work, so the stage they
+belong to is inconclusive rather than passed. Its `response` stage requires
+exactly one
 distinct accepted `quote_response`, whose body `request_id` names the accepted
 request; the town records that `request_id` on the `message_accepted` event,
 verbatim when it is a string of at most 128 characters and otherwise as
