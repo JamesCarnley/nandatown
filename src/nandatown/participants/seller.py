@@ -35,11 +35,19 @@ def build_handler(client: TownClient, journal: Journal):
             # and say so, without applying again.
             done = journal.get(message_id)
             note = {"duplicate": True}
-            if journal.unreported(message_id):
-                # The application happened, but no acknowledgement of it
-                # was ever accepted: the fence died first, or this seller
-                # did. Report the work actually done rather than let the
-                # evidence blame the seller for the lease timing.
+            if journal.unreported(message_id) and not claim.get("duplicate"):
+                # The application happened, and this seller never saw an
+                # acknowledgement of it accepted: the fence died first, or
+                # this seller did. Report the work actually done rather
+                # than let the evidence blame the seller for the timing.
+                #
+                # Not seeing one accepted is not the same as the town
+                # holding no record, though, and the town says which this
+                # is. It re-offers only work it has already completed, so
+                # a duplicate delivery means the record has the
+                # application and the seller merely died before it could
+                # note that down. Re-reporting there would turn one
+                # application into two.
                 note["applied"] = True
                 note["total_cents"] = done["total_cents"]
             return "processed", note, [done["reply"]]
@@ -89,8 +97,8 @@ def ack_accepted(journal: Journal):
 
     An accepted acknowledgement is the only proof that an assertion of
     this seller's own reached the evidence. Until one arrives the
-    application stays marked unreported, and every redelivery carries
-    it again.
+    application stays marked, and a redelivery of work the town has no
+    completed record of carries it again.
     """
     def on_ack_accepted(claim: dict[str, Any],
                         note: dict[str, Any]) -> None:

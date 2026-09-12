@@ -43,10 +43,8 @@ def test_send_retries_one_503():
     assert len(calls) == 2
 
 
-def make_town(tmp_path, fault="none", lease=5.0):
-    app = build_app(str(tmp_path / "town.db"), admin_token="secret")
-    admin = TestClient(app)
-    p = TestProfile(
+def quote_profile(fault="none", lease=5.0):
+    return TestProfile(
         name=f"quote-{fault}",
         task={"kind": "quote", "sku": "widget", "quantity": 2,
               "unit_price_cents": 1995, "expected_total_cents": 3990},
@@ -54,6 +52,12 @@ def make_town(tmp_path, fault="none", lease=5.0):
         capabilities={"buyer": [], "seller": ["quote.read"]},
         fault=fault, lease_seconds=lease, evaluator="stage-evaluator",
     )
+
+
+def make_town(tmp_path, fault="none", lease=5.0):
+    app = build_app(str(tmp_path / "town.db"), admin_token="secret")
+    admin = TestClient(app)
+    p = quote_profile(fault, lease)
     r = admin.post("/runs", json={"profile": p.model_dump()}, headers=ADMIN)
     data = r.json()
     return app, admin, data["run_id"], data["join_tokens"]

@@ -63,12 +63,17 @@ class Journal:
 
     def record(self, message_id: str, result: dict[str, Any],
                unreported: bool = False) -> None:
-        """Write the application and whether the record still lacks it.
+        """Write the application and whether an ack of it was accepted.
 
         Both facts land in one statement on purpose: a participant that
         dies between applying the work and acknowledging it must still
-        learn, on the next delivery, that its application never reached
-        the record.
+        learn, on the next delivery, that it never saw an acknowledgement
+        of this application accepted.
+
+        That is what the mark means, and it is weaker than "the record
+        lacks the application": the acknowledgement may have been
+        accepted and the participant died before hearing so. Only the
+        town can tell those apart.
         """
         with self._conn() as conn:
             conn.execute(
@@ -87,6 +92,11 @@ class Journal:
         return json.loads(row[0]) if row else None
 
     def unreported(self, message_id: str) -> bool:
+        """Whether this participant ever saw an ack of this accepted.
+
+        False is conclusive: one was accepted. True is not, so a caller
+        must not read it as the town holding no record.
+        """
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT unreported FROM processed WHERE message_id=?",
