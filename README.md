@@ -482,12 +482,13 @@ signed evidence; they cannot earn this badge. `receipt` and bundle-aware
 when hashes, the manifest, cross-record bindings, an attestation or evaluator
 replay fail. A bundle recorded by a known earlier evaluator version for its
 mode (one this project shipped) is still accepted when every other check
-passes: its recorded result is not replayed, and the command prints
-`evaluator replay not checked`. That line is command output only; the signed
-receipt does not record it. A bundle naming an unrecognised evaluator version
-is refused. The profile binding is checked against the profile document the
-run recorded, not against a fresh serialization, so a bundle stays
-verifiable when the profile model later gains a field. Bundle-aware verification then checks that claims, coverage and time window
+passes: its recorded result is not replayed, and the receipt states
+`evaluator replay not checked` among its signed limitations, so a reader
+who has the receipt but not the bundle still sees it. A bundle naming an
+unrecognised evaluator version is refused. The profile binding is checked
+against the profile document the run recorded, not against a fresh
+serialization, so a bundle stays verifiable when the profile model later
+gains a field. Bundle-aware verification then checks that claims, coverage and time window
 agree with the bundle; without `--bundle` it checks only the receipt's shape
 and signature.
 Review subject URLs, release labels and custom limitations before sharing:

@@ -413,8 +413,25 @@ def cmd_receipt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _receipt_replay_disclosures(receipt_path, read_disclosures) -> list[str]:
+    """What a verified receipt states about its own evaluator replay."""
+    import json
+
+    try:
+        with open(receipt_path, encoding="utf-8") as f:
+            receipt = json.load(f)
+    except (OSError, ValueError):
+        return []
+    payload = receipt.get("payload") if isinstance(receipt, dict) else None
+    return read_disclosures(payload) if isinstance(payload, dict) else []
+
+
 def cmd_verify_receipt(args: argparse.Namespace) -> int:
-    from .receipt import bundle_receipt_check, verify_receipt
+    from .receipt import (
+        bundle_receipt_check,
+        replay_disclosures,
+        verify_receipt,
+    )
 
     problems = verify_receipt(args.receipt, bundle_dir=args.bundle)
     if not problems:
@@ -425,6 +442,12 @@ def cmd_verify_receipt(args: argparse.Namespace) -> int:
             _, disclosure = bundle_receipt_check(args.bundle)
             if disclosure:
                 print(disclosure)
+        else:
+            # Without the bundle there is nothing to re-check, so what the
+            # receipt says about its own basis is all a reader has.
+            for stated in _receipt_replay_disclosures(args.receipt,
+                                                      replay_disclosures):
+                print(stated)
         print("commitment is not truth, independence, or safety")
         return 0
     for p in problems:

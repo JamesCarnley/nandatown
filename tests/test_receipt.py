@@ -18,6 +18,7 @@ from nandatown.receipt import (
     _bundle_receipt_fields,
     make_receipt,
     render_proof,
+    replay_disclosures,
     verify_receipt,
 )
 from nandatown.records import fingerprint
@@ -510,6 +511,14 @@ def test_historical_evaluator_bundle_gets_receipt_with_disclosure(
     path = make_receipt(bundle_dir)
     assert verify_receipt(path, bundle_dir) == []
 
+    # The disclosure is signed, so it survives the receipt leaving the
+    # bundle behind, and it is stated as well as printed.
+    payload = json.loads(Path(path).read_text())["payload"]
+    assert payload["limitations"][:len(DEFAULT_LIMITATIONS)] == (
+        DEFAULT_LIMITATIONS)
+    assert payload["limitations"][-1].startswith(disclosure)
+    assert replay_disclosures(payload) == [payload["limitations"][-1]]
+
     assert main(["receipt", bundle_dir]) == 0
     assert disclosure in capsys.readouterr().out
     assert main(["verify-receipt", path, "--bundle", bundle_dir]) == 0
@@ -517,10 +526,39 @@ def test_historical_evaluator_bundle_gets_receipt_with_disclosure(
     assert "receipt verifies" in out
     assert disclosure in out
     assert main(["verify-receipt", path]) == 0
-    assert "not checked" not in capsys.readouterr().out
+    detached = capsys.readouterr().out
+    assert "receipt verifies" in detached
+    assert disclosure in detached
     # Town Proof still requires a replay under the local evaluator.
     assert main(["proof", bundle_dir]) == 1
     assert "evaluator version differs" in capsys.readouterr().out
+
+
+def test_a_replayed_bundle_states_no_replay_disclosure(tmp_path, capsys):
+    """Only a receipt that skipped the replay says so."""
+    bundle_dir = complete_passed_bundle(tmp_path)
+    path = make_receipt(bundle_dir)
+
+    payload = json.loads(Path(path).read_text())["payload"]
+    assert payload["limitations"] == DEFAULT_LIMITATIONS
+    assert replay_disclosures(payload) == []
+    assert main(["verify-receipt", path]) == 0
+    assert "not checked" not in capsys.readouterr().out
+
+
+def test_custom_limitations_cannot_drop_the_replay_disclosure(tmp_path):
+    """A caller states more limitations, never fewer than the truth."""
+    bundle_dir, old, local = _genuine_historical_lab_bundle(tmp_path)
+    mine = ["reviewed by the vendor's own team"]
+
+    path = make_receipt(bundle_dir, limitations=mine)
+
+    payload = json.loads(Path(path).read_text())["payload"]
+    assert payload["limitations"][:1] == mine
+    assert replay_disclosures(payload) == [
+        f"evaluator replay not checked: bundle {old}, local {local};"
+        " the recorded result was not reproduced"]
+    assert verify_receipt(path, bundle_dir) == []
 
 
 @pytest.mark.parametrize(

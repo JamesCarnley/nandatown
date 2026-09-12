@@ -32,6 +32,11 @@ DEFAULT_LIMITATIONS = [
     "a favorable result grants no permissions and endorses nothing",
 ]
 
+# A receipt states this among its limitations when its bundle was accepted
+# on the strength of a known earlier evaluator version rather than replayed.
+# Callers match on the prefix, so it stays stable.
+REPLAY_DISCLOSURE_PREFIX = "evaluator replay not checked: "
+
 RECEIPT_FIELDS = {"payload", "signature", "controller_public"}
 PAYLOAD_FIELDS = {
     "claim", "observer", "window", "coverage", "limitations", "evidence",
@@ -251,10 +256,23 @@ def bundle_receipt_check(bundle_dir: str) -> tuple[list[str], str | None]:
     disclosure = None
     if differs is not None:
         disclosure = (
-            f"evaluator replay not checked: bundle {differs.bundle_version},"
+            f"{REPLAY_DISCLOSURE_PREFIX}bundle {differs.bundle_version},"
             f" local {differs.local_version}; the recorded result was not"
             " reproduced")
     return problems, disclosure
+
+
+def replay_disclosures(payload: dict) -> list[str]:
+    """The replay disclosures a receipt payload states for itself.
+
+    A receipt is read where its bundle is not, so what it says about its
+    own basis has to be in the signed payload. This reads that back."""
+    limitations = payload.get("limitations")
+    if not isinstance(limitations, list):
+        return []
+    return [value for value in limitations
+            if isinstance(value, str)
+            and value.startswith(REPLAY_DISCLOSURE_PREFIX)]
 
 
 def make_receipt(bundle_dir: str, keystore=None,
@@ -264,9 +282,9 @@ def make_receipt(bundle_dir: str, keystore=None,
 
     Raises ValueError, naming each problem, when the bundle fails
     bundle_receipt_check. A bundle recorded by a known earlier evaluator
-    version is accepted without replay, and neither the returned path nor
-    the signed receipt says so: call bundle_receipt_check for that
-    disclosure, as the `receipt` command does."""
+    version is accepted without replay, and the receipt states that among
+    its signed limitations, so the disclosure travels with the receipt to
+    a reader who does not have the bundle."""
     from .bundle import load_bundle
     from .identity_portable import (
         OPERATOR_NAME,
@@ -278,7 +296,7 @@ def make_receipt(bundle_dir: str, keystore=None,
     path_problem = _receipt_file_problem(path, missing_ok=True)
     if path_problem:
         raise ValueError(f"refusing to write receipt: {path_problem}")
-    bundle_problems, _ = bundle_receipt_check(bundle_dir)
+    bundle_problems, disclosure = bundle_receipt_check(bundle_dir)
     if bundle_problems:
         raise ValueError("refusing to write receipt: the bundle does not"
                          " verify: " + "; ".join(bundle_problems))
@@ -290,12 +308,18 @@ def make_receipt(bundle_dir: str, keystore=None,
     signer = signer or OPERATOR_NAME
     identity = keystore.new_identity(signer)
 
+    # The disclosure is appended to whatever limitations the caller states
+    # rather than replacing them: it is one more thing that is true of this
+    # receipt, and a caller cannot drop it by supplying its own list.
+    stated = list(limitations or DEFAULT_LIMITATIONS)
+    if disclosure:
+        stated.append(disclosure)
     payload = {
         "claim": fields["claim"],
         "observer": identity["agent_id"],
         "window": fields["window"],
         "coverage": fields["coverage"],
-        "limitations": limitations or DEFAULT_LIMITATIONS,
+        "limitations": stated,
         "evidence": fields["evidence"],
     }
     receipt = {"payload": payload,
@@ -311,10 +335,11 @@ def verify_receipt(receipt_path: str,
     """Offline verification. Returns problems; empty means the receipt
     verifies (which still proves commitment, not truth). With a bundle,
     the bundle must also pass bundle_receipt_check and match every
-    receipt claim. An empty result over a bundle recorded by a known
-    earlier evaluator version does not say that its result was not
-    replayed: bundle_receipt_check returns that disclosure, which
-    `verify-receipt --bundle` prints."""
+    receipt claim. An empty result means the receipt verifies, not that
+    the result was replayed; a receipt over a bundle recorded by a known
+    earlier evaluator version states that among its limitations, and
+    replay_disclosures reads it back. Limitations are not compared with
+    the bundle: they record what was true when the receipt was signed."""
     from .identity_portable import verify_signature
 
     problems: list[str] = []

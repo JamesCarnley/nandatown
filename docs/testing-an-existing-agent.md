@@ -127,8 +127,8 @@ an honest signed partial receipt. Complete passing evidence can render the scope
 badge; the signature proves key commitment, not agent safety or independent agreement.
 `receipt` and `verify-receipt --bundle` refuse a bundle that fails `verify`,
 with one exception: a bundle recorded by a known earlier evaluator version for
-its mode is accepted, and the command prints `evaluator replay not checked`.
-That line is command output only and is not recorded in the signed receipt.
+its mode is accepted, and the receipt states `evaluator replay not checked`
+among its signed limitations, so the disclosure travels with the receipt.
 A bundle naming an unrecognised evaluator version is refused.
 
 Review URLs, labels, events, receipts and attachments for secrets before sharing.
