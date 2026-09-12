@@ -103,8 +103,13 @@ def _response_mismatch(responses: list[TownEvent],
             " to answer the accepted request")
     accepted = _show_value(request_id)
     if shape == "string":
+        # With several accepted requests, say which one this is measured
+        # against: naming it "the accepted request" would read as a claim
+        # that the one the response named is not accepted.
+        against = ("the first accepted request" if len(requests) > 1
+                   else "the accepted request")
         return "failed", (f"the quote response names request {shown}, not"
-                          f" the accepted request {accepted}")
+                          f" {against} {accepted}")
     if shape == "malformed":
         return "failed", (f"the quote response's recorded request_id digest"
                           f" {shown} is malformed and names no request; the"
@@ -150,6 +155,22 @@ def _asserted(note: object, field: str) -> bool | None:
         return None
     value = note.get(field)
     return value if isinstance(value, bool) else None
+
+
+def _counted(note: object, field: str) -> int | None:
+    """The count a participant reported for field, or None.
+
+    A count is an integer. A string or a container is not a report this
+    evaluator can read, and comparing one with >= raises rather than
+    answering; a boolean is not a count either, though True would pass
+    for one. The same rule as _asserted, for the fields that are counts.
+    """
+    if not isinstance(note, dict):
+        return None
+    value = note.get(field)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _unreadable_flags(acks: list[TownEvent], field: str) -> list[TownEvent]:
@@ -317,7 +338,8 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                       for a in find("ack_recorded", observer=buyer,
                                     subject=r.subject)]
     verdict_acks = [a for a in buyer_acks
-                    if "correct" in a.detail.get("note", {})]
+                    if isinstance(a.detail.get("note"), dict)
+                    and "correct" in a.detail["note"]]
     unreadable_verdicts = (_unreadable_flags(verdict_acks, "correct")
                            if strict_flags else [])
     if strict_flags:
@@ -412,8 +434,10 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                                    " a recorded retry"))
     elif fault == "tool_error":
         errored = [e for e in events if e.kind == "ack_recorded"
-                   and e.detail.get("note", {})
-                   .get("tool_errors", 0) >= 1]
+                   and ((_counted(e.detail.get("note"), "tool_errors") or 0) >= 1
+                        if strict_flags
+                        else e.detail.get("note", {})
+                        .get("tool_errors", 0) >= 1)]
         if errored and processed:
             stages.append(_passed(
                 "tool_error_survived",
@@ -427,8 +451,11 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                 " result"))
     elif fault == "context_truncation":
         truncated = [e for e in events if e.kind == "ack_recorded"
-                     and e.detail.get("note", {})
-                     .get("context_truncations", 0) >= 1]
+                     and ((_counted(e.detail.get("note"),
+                                    "context_truncations") or 0) >= 1
+                          if strict_flags
+                          else e.detail.get("note", {})
+                          .get("context_truncations", 0) >= 1)]
         if truncated and processed:
             stages.append(_passed(
                 "truncation_survived",
@@ -449,7 +476,12 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
     if judges_every_request and len(accepted_req) > 1:
         by_stage: dict[str, list[str]] = {
             "claimed": [], "received": [], "processed": [], "response": []}
+        # These stages are about the seller's handling, so only a request
+        # addressed to the seller is the seller's to answer. Every bundled
+        # profile has two roles, so today this filters nothing.
         for event in accepted_req:
+            if event.detail.get("to") not in (None, seller):
+                continue
             other = event.subject
             acks = find("ack_recorded", observer=seller, subject=other)
             if not find("message_claimed", subject=other):

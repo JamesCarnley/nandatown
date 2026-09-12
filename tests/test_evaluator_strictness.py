@@ -30,17 +30,22 @@ NOT_A_YES = [
 HISTORICAL = [LEGACY_EVALUATOR_VERSION, CORRELATION_EVALUATOR_VERSION]
 
 
-def events_with(seller_note=None, buyer_note=None):
+UNCHANGED = object()
+
+
+def events_with(seller_note=UNCHANGED, buyer_note=UNCHANGED):
+    """The clean run with one or both acknowledgement notes replaced.
+
+    A sentinel rather than None, because None is one of the notes worth
+    testing.
+    """
+    replacement = {"seller": seller_note, "buyer": buyer_note}
     out = []
     for event in clean_events():
-        if event.kind == "ack_recorded" and event.observer == "seller" \
-                and seller_note is not None:
+        note = replacement.get(event.observer, UNCHANGED)
+        if event.kind == "ack_recorded" and note is not UNCHANGED:
             event = event.model_copy(update={
-                "detail": dict(event.detail, note=seller_note)})
-        if event.kind == "ack_recorded" and event.observer == "buyer" \
-                and buyer_note is not None:
-            event = event.model_copy(update={
-                "detail": dict(event.detail, note=buyer_note)})
+                "detail": dict(event.detail, note=note)})
         out.append(event)
     return out
 
@@ -122,3 +127,86 @@ def test_historical_evaluators_still_pass_that_run(version):
 
     assert result.evaluator_version == version
     assert result.verdict == "passed"
+
+
+# The fault stages count rather than assert, and a count read with >=
+# raises on a string instead of answering.
+NOT_A_COUNT = [
+    pytest.param("many", id="string"),
+    pytest.param(None, id="null"),
+    pytest.param([1], id="list"),
+    pytest.param({"n": 1}, id="object"),
+    pytest.param(True, id="boolean"),
+]
+COUNTERS = [("tool_error", "tool_errors", "tool_error_survived"),
+            ("context_truncation", "context_truncations",
+             "truncation_survived")]
+
+
+@pytest.mark.parametrize("value", NOT_A_COUNT)
+@pytest.mark.parametrize("fault, field, stage_name", COUNTERS)
+def test_a_non_integer_count_is_no_report(value, fault, field, stage_name):
+    """A participant can send this, so it must not end the run.
+
+    The note is unvalidated, so a subject reaching the coordinator can
+    put anything here. Comparing a string with >= raises, which would
+    surface as Town failing rather than the subject saying nothing.
+    """
+    events = events_with(
+        seller_note={"applied": True, "total_cents": 3990, field: value})
+
+    result = evaluate(profile(fault), "run-1", events)
+
+    assert stage(result, stage_name).status == "not_enough_evidence"
+
+
+@pytest.mark.parametrize("fault, field, stage_name", COUNTERS)
+def test_a_real_count_still_reports(fault, field, stage_name):
+    events = events_with(
+        seller_note={"applied": True, "total_cents": 3990, field: 2})
+
+    result = evaluate(profile(fault), "run-1", events)
+
+    assert stage(result, stage_name).status == "passed"
+
+
+@pytest.mark.parametrize("note", [5, "correct", ["correct"], None, True])
+def test_a_note_that_is_not_an_object_carries_no_assertion(note):
+    """The coordinator refuses these, so only a crafted bundle has one.
+
+    It should replay to an honest verdict rather than raise, because a
+    raise here is reported as Town failing on its own evidence.
+    """
+    result = evaluate(profile(), "run-1", events_with(buyer_note=note))
+
+    assert stage(result, "correct").status in ("not_enough_evidence",
+                                               "not_tested")
+    assert result.verdict != "passed"
+
+
+def test_a_request_for_someone_else_is_not_the_sellers_to_answer():
+    """These stages judge the seller, so only its own requests count."""
+    events = clean_events()
+    events = events[:4] + [
+        ev(5, "message_accepted", "q-2", kind="quote_request",
+           sender="buyer", to="auditor"),
+    ] + events[4:]
+
+    result = evaluate(profile(), "run-1", events)
+
+    assert result.verdict == "passed", [
+        (s.name, s.status, s.note) for s in result.stages]
+
+
+def test_a_response_naming_another_accepted_request_says_which_it_judged():
+    """Both requests were accepted; the note must not deny that."""
+    events = two_requests_one_answered()
+    events = [e.model_copy(update={"detail": dict(e.detail,
+                                                  request_id="q-2")})
+              if e.kind == "message_accepted" and e.subject == "r-1"
+              else e
+              for e in events]
+
+    note = stage(evaluate(profile(), "run-1", events), "response").note
+
+    assert "the first accepted request" in note, note

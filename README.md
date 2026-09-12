@@ -193,7 +193,8 @@ valid for its recorded bytes.
 The Track evaluator is `0.4.0`. It reads an acknowledgement flag only when it
 is a JSON boolean: `applied`, `correct` and `duplicate` given as a string, a
 number or anything else state nothing about the work, so the stage they belong
-to is inconclusive rather than passed. It also judges every accepted
+to is inconclusive rather than passed. The fault stages read `tool_errors` and
+`context_truncations` the same way, as integers. It also judges every accepted
 `quote_request`, not only the first: one that was never claimed, acknowledged,
 applied or answered leaves the stage it did not reach inconclusive and the run
 incomplete, naming that request. Town's own buyer sends exactly one request,
