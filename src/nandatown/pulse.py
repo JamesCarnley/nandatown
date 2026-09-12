@@ -20,17 +20,46 @@ from .records import EvidenceRecord
 OBSERVER = "town-pulse.v1"
 
 
+def unprobeable(url: object) -> str | None:
+    """Why this URL can never be probed at all, or None.
+
+    Parsing a URL is not the same as being able to use it: httpx decodes
+    a punycode hostname only when the host is read, and a malformed
+    A-label raises there. Both failures are the operator's typo, not a
+    service being down, and neither is an httpx.HTTPError.
+    """
+    if not isinstance(url, str):
+        return "must be a string"
+    try:
+        parsed = httpx.URL(url)
+        if not parsed.host:
+            return "no host"
+    except (httpx.InvalidURL, UnicodeError) as exc:
+        return str(exc) or type(exc).__name__
+    return None
+
+
 def probe(url: str, timeout: float = 3.0) -> dict[str, Any]:
     started = time.time()
+
+    def outcome(error: str) -> dict[str, Any]:
+        return {"ok": False, "status": 0,
+                "latency_ms": round((time.time() - started) * 1000, 1),
+                "error": error}
+
+    # A schedule outlives any one probe, so nothing a single target does
+    # may end it: a target that cannot be probed is recorded as down,
+    # like one that cannot be reached, and the others keep their history.
+    problem = unprobeable(url)
+    if problem is not None:
+        return outcome("unprobeable URL")
     try:
         response = httpx.get(url, timeout=timeout)
         return {"ok": response.status_code < 500,
                 "status": response.status_code,
                 "latency_ms": round((time.time() - started) * 1000, 1)}
     except httpx.HTTPError as exc:
-        return {"ok": False, "status": 0,
-                "latency_ms": round((time.time() - started) * 1000, 1),
-                "error": type(exc).__name__}
+        return outcome(type(exc).__name__)
 
 
 def _conn(db_path: str) -> sqlite3.Connection:
