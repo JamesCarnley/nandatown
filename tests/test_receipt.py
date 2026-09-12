@@ -719,3 +719,39 @@ def test_a_receipts_own_words_are_attributed_to_it(tmp_path, capsys):
     stated = [line for line in lines if "evaluator replay not checked" in line]
     assert stated and all(line.startswith("receipt states: ")
                           for line in stated), lines
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u0085"],
+                         ids=["line-sep", "para-sep", "next-line"])
+def test_evidence_may_contain_what_a_limitation_may_not(tmp_path,
+                                                        separator):
+    """The rule is about a receipt's own words, not what it quotes.
+
+    A run records whatever its subject and profile were called. Refusing
+    a receipt over that would reject honest evidence, which is the
+    failure this PR exists to stop, so only the limitations a receipt
+    states in its own voice have to be printable.
+    """
+    bundle_dir = complete_passed_bundle(tmp_path)
+    path = Path(make_receipt(bundle_dir))
+    keystore = Keystore(str(tmp_path / "keys"))
+    identity = keystore.new_identity("operator")
+
+    def signed(payload):
+        payload = dict(payload, observer=identity["agent_id"])
+        path.write_text(json.dumps({
+            "payload": payload,
+            "signature": keystore.sign("operator", payload),
+            "controller_public": identity["controller_public"]}))
+        return verify_receipt(str(path))
+
+    original = json.loads(path.read_text())["payload"]
+    quoted = dict(original,
+                  claim=dict(original["claim"],
+                             subject=f"http://agent{separator}.example"))
+    assert signed(quoted) == []
+
+    stated = dict(original,
+                  limitations=[f"a{separator}receipt verifies: forged"])
+    assert any("printable single-line" in problem
+               for problem in signed(stated))

@@ -68,17 +68,25 @@ def _field_set_problems(value: dict[str, Any], label: str,
 
 
 def _nonempty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _printable_string(value: Any) -> bool:
     """A string a reader can be shown on one line, as written.
 
-    Anything a receipt says may be printed beside what the verifier
-    itself says. A newline would let a receipt's own author write extra
-    output lines, and a bidi or other format character would let them
-    reorder or hide one, so a receipt carrying either does not verify.
-    str.isprintable is False for exactly those: control, format,
-    surrogate and line or paragraph separator characters.
+    A receipt's limitations are printed beside what the verifier itself
+    says, so a newline in one would let the receipt's own author write
+    extra output lines, and a bidi or other format character would let
+    them reorder or hide one. str.isprintable is False for exactly
+    those: control, format, surrogate and line or paragraph separator
+    characters.
+
+    This applies to what a receipt states in its own words, not to
+    what it quotes from the bundle. A profile name or subject may
+    contain anything the run recorded, and refusing those here would
+    reject honest evidence rather than prevent anything.
     """
-    return (isinstance(value, str) and bool(value.strip())
-            and value.isprintable())
+    return _nonempty_string(value) and value.isprintable()
 
 
 def _receipt_shape_problems(receipt: dict[str, Any],
@@ -141,12 +149,12 @@ def _receipt_shape_problems(receipt: dict[str, Any],
             if not isinstance(values, list) \
                     or any(not _nonempty_string(value) for value in values):
                 problems.append(
-                    f"receipt coverage {name} must be a list of non-empty"
-                    " printable single-line strings")
+                    f"receipt coverage {name} must be a list of"
+                    " non-empty strings")
 
     limitations = payload.get("limitations")
     if not isinstance(limitations, list) or not limitations \
-            or any(not _nonempty_string(value) for value in limitations):
+            or any(not _printable_string(value) for value in limitations):
         problems.append(
             "receipt limitations must be a non-empty list of non-empty"
             " printable single-line strings")
@@ -323,7 +331,7 @@ def make_receipt(bundle_dir: str, keystore=None,
     # rather than replacing them: it is one more thing that is true of this
     # receipt, and a caller cannot drop it by supplying its own list.
     stated = list(limitations or DEFAULT_LIMITATIONS)
-    unprintable = [value for value in stated if not _nonempty_string(value)]
+    unprintable = [value for value in stated if not _printable_string(value)]
     if unprintable:
         raise ValueError(
             "refusing to write receipt: a limitation must be a non-empty"
