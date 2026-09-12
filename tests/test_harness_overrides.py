@@ -243,14 +243,17 @@ def test_external_buyer_that_never_asserts_is_incomplete_within_timeout(
     assert stages["response"].status == "passed", detail
     assert stages["correct"].status == "not_enough_evidence", detail
     assert stages["correct"].note == "the buyer made no correctness assertion"
-    assert elapsed < 20 + 5
+    # The stock seller no longer ends the run early, so this is the whole
+    # deadline plus settling, not the deadline less the seller's exit.
+    assert elapsed < 20 + 12
 
 
 # A seller subject that serves exactly one request and exits 0. With
 # argv[1] "respond" it sends the quote response and acknowledges the
 # request first; "misaddressed" does the same but sends the response to
-# itself instead of the buyer; with "silent" it claims the request and
-# leaves.
+# itself instead of the buyer; "bare" responds and acknowledges with only
+# what town-protocol.md asks for, which does not include "applied"; with
+# "silent" it claims the request and leaves.
 ONE_SHOT_SELLER = """\
 import os, sys, time
 from nandatown.client import TownClient
@@ -261,15 +264,16 @@ claim, deadline = None, time.time() + 30
 while claim is None and time.time() < deadline:
     client.notify(wait=0.2)
     claim = client.claim()
-if claim is not None and sys.argv[1] in ("respond", "misaddressed"):
+if claim is not None and sys.argv[1] in ("respond", "misaddressed", "bare"):
     body = claim["body"]
     total = body["quantity"] * body["unit_price_cents"]
-    to = claim["from"] if sys.argv[1] == "respond" else os.environ["NAME"]
+    to = claim["from"] if sys.argv[1] != "misaddressed" else os.environ["NAME"]
     client.send(message_id="r-1", to=to, kind="quote_response",
                 body={"request_id": claim["message_id"],
                       "total_cents": total})
-    client.ack(claim["message_id"], claim["fence"], "processed",
-               {"applied": True, "total_cents": total})
+    note = ({"total_cents": total} if sys.argv[1] == "bare"
+            else {"applied": True, "total_cents": total})
+    client.ack(claim["message_id"], claim["fence"], "processed", note)
 """
 
 # The stock buyer on a slow host: each claim starts a second late, so the
@@ -314,14 +318,15 @@ def _test_one_shot_seller(tmp_path, capsys, mode):
     return code, bundle["result"], bundle["events"], elapsed
 
 
-def _run_one_shot_seller_with_buyer(tmp_path, connection, wait_timeout=30):
+def _run_one_shot_seller_with_buyer(tmp_path, connection, wait_timeout=30,
+                                    seller_mode="respond"):
     """Both sides are subjects: a one-shot seller command, and a buyer that
     deliberates, joined through the --wait handoff or run as a command."""
     seller_script = tmp_path / "one_shot_seller.py"
     seller_script.write_text(ONE_SHOT_SELLER)
     buyer_script = tmp_path / "deliberate_buyer.py"
     buyer_script.write_text(DELIBERATE_BUYER)
-    seller_command = [sys.executable, str(seller_script), "respond"]
+    seller_command = [sys.executable, str(seller_script), seller_mode]
     buyer_command = [sys.executable, str(buyer_script), "1.5", "assert"]
     processes: list[subprocess.Popen] = []
 
@@ -333,6 +338,7 @@ def _run_one_shot_seller_with_buyer(tmp_path, connection, wait_timeout=30):
 
     external = {"seller": seller_command,
                 "buyer": None if connection == "wait" else buyer_command}
+    started = time.monotonic()
     try:
         _, result = run_town("quote-clean", str(tmp_path / "runs"),
                              external=external, wait_timeout=wait_timeout,
@@ -344,7 +350,7 @@ def _run_one_shot_seller_with_buyer(tmp_path, connection, wait_timeout=30):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-    return result
+    return result, time.monotonic() - started
 
 
 @pytest.mark.parametrize("connection", ["wait", "cmd"])
@@ -354,13 +360,37 @@ def test_one_shot_seller_does_not_cut_off_an_external_buyer(
     # the buyer's. An externally joined buyer has no process to watch, so
     # the run has to keep waiting for its acknowledgement exactly as it
     # would for a managed one, which is the control here.
-    result = _run_one_shot_seller_with_buyer(tmp_path, connection)
+    result, elapsed = _run_one_shot_seller_with_buyer(tmp_path, connection)
 
     detail = [(s.name, s.status, s.note) for s in result.stages]
     stages = {s.name: s for s in result.stages}
     assert result.verdict == "passed", detail
     assert stages["response"].status == "passed", detail
     assert stages["correct"].status == "passed", detail
+    # Not truncated is half of it: the run must also end when the buyer
+    # settles rather than sit out the 30 s deadline it was given.
+    assert elapsed < 10, detail
+
+
+@pytest.mark.parametrize("connection", ["wait", "cmd"])
+def test_a_seller_that_acks_only_what_the_protocol_asks_ends_the_run(
+        tmp_path, connection):
+    """town-protocol.md documents a status and a note of observations.
+
+    It never mentions "applied", so a seller written to it says nothing
+    the seller-side quiescence check recognises. Once such a seller has
+    exited there is nothing further to wait for, and the run must not
+    spend the rest of its deadline waiting for a note that can no longer
+    arrive.
+    """
+    result, elapsed = _run_one_shot_seller_with_buyer(
+        tmp_path, connection, seller_mode="bare")
+
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    stages = {s.name: s for s in result.stages}
+    assert stages["response"].status == "passed", detail
+    assert stages["correct"].status == "passed", detail
+    assert elapsed < 10, detail
 
 
 def test_one_shot_seller_with_a_silent_external_buyer_ends_on_the_deadline(
@@ -420,7 +450,7 @@ def test_misaddressed_one_shot_seller_ends_promptly_with_an_external_buyer(
 
     started = time.monotonic()
     try:
-        _, result = run_town(
+        bundle_dir, result = run_town(
             "quote-clean", str(tmp_path / "runs"),
             external={"seller": [sys.executable, str(seller_script),
                                  "misaddressed"],
@@ -434,6 +464,13 @@ def test_misaddressed_one_shot_seller_ends_promptly_with_an_external_buyer(
 
     detail = [(s.name, s.status, s.note) for s in result.stages]
     assert result.verdict == "incomplete", detail
+    # A response really was sent and accepted; it just went to the wrong
+    # participant. Without this the test would pass on a seller that sent
+    # nothing, which is a different case entirely.
+    accepted = [e for e in load_bundle(bundle_dir)["events"]
+                if e.kind == "message_accepted"
+                and e.detail.get("kind") == "quote_response"]
+    assert [e.detail["to"] for e in accepted] == ["seller"], accepted
     assert elapsed < 40, detail
 
 

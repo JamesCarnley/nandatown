@@ -561,8 +561,12 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
             if buyer is None:
                 # Seller-side completion is not the end of an external
                 # buyer's turn: it still has to claim and judge the reply.
+                # A seller that has exited is finished whatever its
+                # acknowledgements say, and waiting for a note it can no
+                # longer send just spends the deadline: the protocol asks
+                # a seller to acknowledge, not to say "applied".
                 events = get_events()
-                if (_quiescent(profile, events)
+                if ((seller_done or _quiescent(profile, events))
                         and _buyer_settled_response(events)):
                     break
             if grants:
@@ -606,9 +610,12 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
             post_event("runner", "participant_exited", "buyer",
                        {"exit_code": buyer_exit})
 
+        # This settling time is the seller's, so a seller that has already
+        # exited needs none of it: waiting on a note it can no longer send
+        # only delays the bundle.
         quiet_deadline = time.time() + (0.0 if refused_role else 8.0)
         while time.time() < quiet_deadline:
-            if _quiescent(profile, get_events()):
+            if seller_done or _quiescent(profile, get_events()):
                 break
             time.sleep(0.2)
 
