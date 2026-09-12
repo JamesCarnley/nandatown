@@ -340,12 +340,16 @@ UNUSABLE_URLS = [
     pytest.param("http://127.0.0.1:-1", id="port-negative"),
     pytest.param("http://[::1]:99999", id="ipv6-port-99999"),
     pytest.param("https://agent.example:" + "9" * 30, id="port-30-digits"),
+    pytest.param("http://xn--.localhost:9", id="empty-a-label"),
+    pytest.param("http://xn--a.localhost:9", id="undecodable-a-label"),
 ]
 USABLE_URLS = ["http://10.0.0.5:8940", "https://agent.example",
                "http://127.0.0.1:9", "http://[::1]:8940",
                "https://agent.example:8443/a2a/", "http://127.0.0.1:1",
                "http://127.0.0.1:65535", "http://[::1]:65535",
-               "http://127.0.0.1:"]
+               "http://127.0.0.1:", "http://xn--caf-dma.localhost:8940"]
+MALFORMED_A_LABEL_URLS = ["http://xn--.localhost:9",
+                          "http://xn--a.localhost:9"]
 
 
 def _assert_resolution_refused(bundle_dir, result, reason, problems=()):
@@ -385,6 +389,8 @@ def test_unusable_index_url_fails_resolution_not_card_retrieval(tmp_path,
 @pytest.mark.parametrize("url", [
     pytest.param("http://127.0.0.1:9\n", id="trailing-newline"),
     pytest.param("http://" + "a" * 1_000_000, id="one-megabyte"),
+    pytest.param("http://xn--.localhost:9", id="empty-a-label"),
+    pytest.param("http://xn--a.localhost:9", id="undecodable-a-label"),
 ])
 def test_url_httpx_rejects_fails_resolution_without_traceback(tmp_path,
                                                              url):
@@ -392,6 +398,38 @@ def test_url_httpx_rejects_fails_resolution_without_traceback(tmp_path,
     bundle_dir, result = run_path_test(url, str(tmp_path / "runs"))
 
     _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+
+
+@pytest.mark.parametrize("via", ["url", "index"])
+@pytest.mark.parametrize("url", MALFORMED_A_LABEL_URLS)
+def test_malformed_a_label_is_refused_before_any_request(tmp_path, url, via):
+    """Reading the host of these decodes punycode, which raises.
+
+    httpx parses them, so the refusal has to come from evaluating the host
+    itself, not from parsing. The subject is never contacted.
+    """
+    requests = []
+
+    def record(request):
+        requests.append(request.url)
+        return httpx.Response(200, json=build_agent_card(SUBJECT))
+
+    http = httpx.Client(transport=httpx.MockTransport(record))
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": url}}}))
+
+    if via == "url":
+        bundle_dir, result = run_path_test(url, str(tmp_path / "runs"),
+                                           http=http)
+        reason = INVALID_URL_REASON
+    else:
+        bundle_dir, result = run_path_test(
+            None, str(tmp_path / "runs"), index_file=str(index),
+            agent_name="maya-seller", http=http)
+        reason = INVALID_INDEX_URL_REASON
+
+    _assert_resolution_refused(bundle_dir, result, reason)
+    assert requests == []
 
 
 @pytest.mark.parametrize("via", ["url", "index"])

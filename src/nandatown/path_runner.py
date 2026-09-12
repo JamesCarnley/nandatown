@@ -177,15 +177,21 @@ def _is_endpoint_url(value: object) -> bool:
     parses a port outside that range, which then fails only on connect.
     Raw whitespace is refused because httpx would drop it or percent-encode
     it into a different endpoint.
+
+    Parsing a URL is not the same as being able to read its parts. httpx
+    decodes a punycode hostname only when the host is asked for, and a
+    malformed A-label such as ``xn--`` raises there instead. So the parts
+    are read inside the guard, and a host that will not decode makes the
+    URL unusable rather than a crash.
     """
     if not isinstance(value, str) or any(ch.isspace() for ch in value):
         return False
     try:
         parsed = httpx.URL(value)
-    except httpx.InvalidURL:
+        return (parsed.scheme in ("http", "https") and bool(parsed.host)
+                and (parsed.port is None or 1 <= parsed.port <= 65535))
+    except (httpx.InvalidURL, UnicodeError):
         return False
-    return (parsed.scheme in ("http", "https") and bool(parsed.host)
-            and (parsed.port is None or 1 <= parsed.port <= 65535))
 
 
 def _subject_label(subject_url: str | None,
