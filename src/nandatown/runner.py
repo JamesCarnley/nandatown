@@ -591,14 +591,14 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
                     else:
                         post_event("runner", "participant_exited",
                                    "seller", {"exit_code": rc})
-                        if buyer is None or not _response_accepted(
-                                get_events(), buyer_name):
+                        if not _response_accepted(get_events(), buyer_name):
                             break
                         # The seller left after its quote response to the
                         # buyer was accepted, so its part is over, but the
-                        # buyer process still has to claim and judge that
-                        # response. Let the buyer finish and exit on its
-                        # own, within the same deadline.
+                        # buyer still has to claim and judge that response.
+                        # It gets the rest of the same deadline to do so,
+                        # whether it is a process this runner watches or an
+                        # outside agent it only sees acknowledge.
                         seller_done = True
             time.sleep(0.1)
         if buyer is not None:

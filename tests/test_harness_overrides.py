@@ -314,6 +314,129 @@ def _test_one_shot_seller(tmp_path, capsys, mode):
     return code, bundle["result"], bundle["events"], elapsed
 
 
+def _run_one_shot_seller_with_buyer(tmp_path, connection, wait_timeout=30):
+    """Both sides are subjects: a one-shot seller command, and a buyer that
+    deliberates, joined through the --wait handoff or run as a command."""
+    seller_script = tmp_path / "one_shot_seller.py"
+    seller_script.write_text(ONE_SHOT_SELLER)
+    buyer_script = tmp_path / "deliberate_buyer.py"
+    buyer_script.write_text(DELIBERATE_BUYER)
+    seller_command = [sys.executable, str(seller_script), "respond"]
+    buyer_command = [sys.executable, str(buyer_script), "1.5", "assert"]
+    processes: list[subprocess.Popen] = []
+
+    def connect(role, env):
+        assert role == "buyer"
+        processes.append(subprocess.Popen(
+            buyer_command, env={**os.environ, **env},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+
+    external = {"seller": seller_command,
+                "buyer": None if connection == "wait" else buyer_command}
+    try:
+        _, result = run_town("quote-clean", str(tmp_path / "runs"),
+                             external=external, wait_timeout=wait_timeout,
+                             on_credentials=connect)
+    finally:
+        for process in processes:
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+    return result
+
+
+@pytest.mark.parametrize("connection", ["wait", "cmd"])
+def test_one_shot_seller_does_not_cut_off_an_external_buyer(
+        tmp_path, connection):
+    # The seller answers and exits, which ends the seller's turn but not
+    # the buyer's. An externally joined buyer has no process to watch, so
+    # the run has to keep waiting for its acknowledgement exactly as it
+    # would for a managed one, which is the control here.
+    result = _run_one_shot_seller_with_buyer(tmp_path, connection)
+
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    stages = {s.name: s for s in result.stages}
+    assert result.verdict == "passed", detail
+    assert stages["response"].status == "passed", detail
+    assert stages["correct"].status == "passed", detail
+
+
+def test_one_shot_seller_with_a_silent_external_buyer_ends_on_the_deadline(
+        tmp_path):
+    # Waiting for the buyer is still bounded: nothing acknowledges the
+    # reply, so the run ends incomplete on its own timeout rather than
+    # hanging, and the missing evidence is named as the buyer's.
+    seller_script = tmp_path / "one_shot_seller.py"
+    seller_script.write_text(ONE_SHOT_SELLER)
+    buyer_script = tmp_path / "deliberate_buyer.py"
+    buyer_script.write_text(DELIBERATE_BUYER)
+    processes: list[subprocess.Popen] = []
+
+    def connect(role, env):
+        processes.append(subprocess.Popen(
+            [sys.executable, str(buyer_script), "3600", "silent"],
+            env={**os.environ, **env},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+
+    started = time.monotonic()
+    try:
+        _, result = run_town(
+            "quote-clean", str(tmp_path / "runs"),
+            external={"seller": [sys.executable, str(seller_script),
+                                 "respond"],
+                      "buyer": None},
+            wait_timeout=20, on_credentials=connect)
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait(timeout=5)
+    elapsed = time.monotonic() - started
+
+    stages = {s.name: s for s in result.stages}
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert result.verdict == "incomplete", detail
+    assert stages["response"].status == "passed", detail
+    assert stages["correct"].status == "not_enough_evidence", detail
+    assert elapsed < 20 + 10
+
+
+def test_misaddressed_one_shot_seller_ends_promptly_with_an_external_buyer(
+        tmp_path):
+    # Nothing ever reaches the buyer's inbox, so there is nothing for it to
+    # finish and no reason to hold the run open for the full timeout.
+    seller_script = tmp_path / "one_shot_seller.py"
+    seller_script.write_text(ONE_SHOT_SELLER)
+    buyer_script = tmp_path / "deliberate_buyer.py"
+    buyer_script.write_text(DELIBERATE_BUYER)
+    processes: list[subprocess.Popen] = []
+
+    def connect(role, env):
+        processes.append(subprocess.Popen(
+            [sys.executable, str(buyer_script), "3600", "silent"],
+            env={**os.environ, **env},
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+
+    started = time.monotonic()
+    try:
+        _, result = run_town(
+            "quote-clean", str(tmp_path / "runs"),
+            external={"seller": [sys.executable, str(seller_script),
+                                 "misaddressed"],
+                      "buyer": None},
+            wait_timeout=60, on_credentials=connect)
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait(timeout=5)
+    elapsed = time.monotonic() - started
+
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert result.verdict == "incomplete", detail
+    assert elapsed < 40, detail
+
+
 def test_one_shot_seller_is_judged_after_the_stock_buyer_claims(
         tmp_path, capsys, slow_stock_buyer):
     # The subject answered, acknowledged and exited 0: its job is done.
