@@ -244,6 +244,10 @@ class _Interrupted(Exception):
     """Stands in for KeyboardInterrupt, which would stop pytest itself."""
 
 
+class _Unwound(BaseException):
+    """A caller's own handler unwinding, which SystemExit really does."""
+
+
 def test_a_stop_signal_while_handlers_are_restored_leaves_both_restored(
         monkeypatch):
     # SIGINT is raised as soon as the guard has put SIGINT's handler back,
@@ -350,6 +354,104 @@ def test_holding_restores_caller_handlers_when_blocking_them_raises(
         for signum in callers:
             signal.raise_signal(signum)
         assert delivered == [signal.SIGINT, signal.SIGTERM]
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def _failing_mask_module(instrumented_signal=None):
+    """A signal module whose blocking fails before it takes effect.
+
+    The restores then run unblocked, which is the path the fix adds and
+    the one where a stop signal can arrive between two of them.
+    """
+    def refuse_to_block(how, signals):
+        if how == signal.SIG_BLOCK and signals:
+            raise _Interrupted
+        return signal.pthread_sigmask(how, signals)
+
+    module = types.ModuleType("signal")
+    module.__dict__.update(vars(signal))
+    module.pthread_sigmask = refuse_to_block
+    if instrumented_signal is not None:
+        module.signal = instrumented_signal
+    return module
+
+
+def test_holding_restores_every_handler_when_one_restore_unwinds(monkeypatch):
+    # Restoring unblocked means a stop signal can land between two
+    # restores and run the handler just put back. If that handler
+    # unwinds, the handlers still to be restored must not be abandoned:
+    # they would keep recording into a block that has already ended, and
+    # nothing would ever put them back.
+    calls = []
+    real_signal = signal.signal
+
+    def restore_then_unwind(signum, handler):
+        result = real_signal(signum, handler)
+        calls.append(signum)
+        # The first two calls install the guard's own handlers; the third
+        # is the first restore, standing in for the arriving signal.
+        if len(calls) == 3:
+            raise _Unwound("the restored handler ran and unwound")
+        return result
+
+    delivered = []
+    callers = {signum: (lambda s, _frame: delivered.append(s))
+               for signum in (signal.SIGINT, signal.SIGTERM)}
+    previous = {signum: signal.getsignal(signum) for signum in callers}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    try:
+        for signum, handler in callers.items():
+            signal.signal(signum, handler)
+        monkeypatch.setattr(runner, "signal",
+                            _failing_mask_module(restore_then_unwind))
+        with pytest.raises(_Unwound):
+            with runner._stop_signals_held():
+                pass
+
+        for signum, handler in callers.items():
+            assert signal.getsignal(signum) is handler
+        for signum in callers:
+            signal.raise_signal(signum)
+        assert delivered == [signal.SIGINT, signal.SIGTERM]
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == mask
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def test_holding_restores_the_rest_when_one_restore_raises(monkeypatch):
+    """A restore that fails outright still leaves the others done."""
+    calls = []
+    real_signal = signal.signal
+
+    def restore_then_fail(signum, handler):
+        result = real_signal(signum, handler)
+        calls.append(signum)
+        if len(calls) == 3:
+            raise OSError("cannot set this handler")
+        return result
+
+    callers = {signum: (lambda s, _frame: None)
+               for signum in (signal.SIGINT, signal.SIGTERM)}
+    previous = {signum: signal.getsignal(signum) for signum in callers}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    try:
+        for signum, handler in callers.items():
+            signal.signal(signum, handler)
+        monkeypatch.setattr(runner, "signal",
+                            _failing_mask_module(restore_then_fail))
+        with pytest.raises(OSError, match="cannot set this handler"):
+            with runner._stop_signals_held():
+                pass
+
+        # The one that raised keeps whatever the failing call left; the
+        # rest are the caller's again.
+        assert signal.getsignal(signal.SIGTERM) is callers[signal.SIGTERM]
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == mask
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         for signum, handler in previous.items():

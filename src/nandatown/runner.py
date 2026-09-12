@@ -122,8 +122,11 @@ def _stop_signals_held():
         # the signals are blocked, so none inherits the blocked mask.
         # Blocking is what makes the restores atomic, but restoring is what
         # makes holding safe at all. So a failure to block still restores,
-        # unblocked: a caller that catches it keeps its own handlers rather
-        # than the recording ones, which would swallow every later stop.
+        # unblocked, and each handler is restored independently: one that
+        # raises, or a signal arriving between two of them while they are
+        # unblocked, must not leave the rest recording into a list this
+        # block has finished with, which would swallow them for good. The
+        # first failure is re-raised once every handler is back.
         mask = None
         try:
             try:
@@ -131,14 +134,25 @@ def _stop_signals_held():
                     mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
                     signal.pthread_sigmask(signal.SIG_BLOCK, list(saved))
             finally:
+                failure: BaseException | None = None
                 for signum, previous in saved.items():
-                    signal.signal(signum, previous)
+                    try:
+                        signal.signal(signum, previous)
+                    except BaseException as exc:  # noqa: BLE001
+                        failure = failure or exc
+                if failure is not None:
+                    raise failure
         finally:
             if mask is not None:
                 signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         for signum in dict.fromkeys(held):
             # If this handler raises, a second held signal is not raised
             # again; the caller is already unwinding, and its cleanup runs.
+            # A stop signal that arrives during the blocked restores above
+            # is delivered by that mask restore, before this loop, and a
+            # handler that unwinds there drops the held ones the same way:
+            # either path leaves the caller unwinding on an equivalent
+            # signal, and run_town's own cleanup still runs.
             # A signal wakeup fd, such as an asyncio loop's, sees a held
             # signal twice, on arrival and here; the TUI runs run_town in
             # worker threads, where nothing is held.
