@@ -145,18 +145,24 @@ def load_bundle(directory: str) -> dict[str, Any]:
 
     manifest = json.loads(read("manifest.json"))
     mode = manifest.get("mode", "track")
+    profile_json = read("profile.json")
     if mode == "lab":
         from .sim.scenario import ScenarioSpec
-        profile: Any = ScenarioSpec.model_validate_json(read("profile.json"))
+        profile: Any = ScenarioSpec.model_validate_json(profile_json)
     elif mode == "path":
         from .path_profiles import PathProfile
-        profile = PathProfile.model_validate_json(read("profile.json"))
+        profile = PathProfile.model_validate_json(profile_json)
     else:
-        profile = TestProfile.model_validate_json(read("profile.json"))
+        profile = TestProfile.model_validate_json(profile_json)
     return {
         "directory": directory,
         "mode": mode,
         "profile": profile,
+        # The profile as its producer recorded it. profile is that document
+        # read by today's model, which is what a caller wants to work with
+        # but not what the run committed to: a field added to the model
+        # since appears there with its default and changes the fingerprint.
+        "profile_document": json.loads(profile_json),
         "run": RunRecord.model_validate_json(read("run.json")),
         "intents": [Intent.model_validate_json(line)
                     for line in read("intents.jsonl").splitlines() if line],
@@ -324,7 +330,12 @@ def verify_bundle(directory: str) -> list[str]:
         problems.append("run and result name different run ids")
     if run.profile_name != profile_name:
         problems.append("run profile name does not match profile")
-    if run.profile_fingerprint != fingerprint(profile.model_dump()):
+    # Against the recorded document, not the model's reading of it: a run
+    # committed to what its producer wrote, and every field the model has
+    # gained since would otherwise break every older bundle at once. This
+    # is also the stricter comparison, because it sees a field the model
+    # would drop.
+    if run.profile_fingerprint != fingerprint(bundle["profile_document"]):
         problems.append("run profile fingerprint does not match profile")
     if any(intent.run_id != run.run_id for intent in bundle["intents"]):
         problems.append("intent names a different run id")

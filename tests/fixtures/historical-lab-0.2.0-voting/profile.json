@@ -1,0 +1,65 @@
+{
+  "name": "voting",
+  "description": "Signed ballots, one agent one vote, a double voter rejected on the second ballot, and the tally broadcast to every voter.",
+  "seed": 42,
+  "layers": {
+    "transport": "memory.v1",
+    "communication": "envelope.v1",
+    "identity": "keys.v1",
+    "registry": "index.v1",
+    "auth": "hmac.v1",
+    "trust": "reputation.v1",
+    "payments": "ledger.v1",
+    "coordination": "contractnet.v1",
+    "negotiation": "haggle.v1",
+    "memory": "kv.v1",
+    "privacy": "redact.v1",
+    "data_facts": "evidence.v1"
+  },
+  "agents": [
+    {
+      "name": "ballot-box",
+      "role": "ballot_box",
+      "config": {
+        "choices": [
+          "apricot",
+          "plum"
+        ],
+        "close_after": 3.0
+      }
+    },
+    {
+      "name": "voter-1",
+      "role": "voter",
+      "config": {
+        "choice": "apricot"
+      }
+    },
+    {
+      "name": "voter-2",
+      "role": "voter",
+      "config": {
+        "choice": "plum"
+      }
+    },
+    {
+      "name": "voter-3",
+      "role": "voter",
+      "config": {
+        "choice": "apricot"
+      }
+    },
+    {
+      "name": "voter-double",
+      "role": "voter",
+      "config": {
+        "choice": "plum",
+        "double_vote": true
+      }
+    }
+  ],
+  "faults": [],
+  "redact_fields": [],
+  "max_time": 60.0,
+  "validator": "voting"
+}

@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -431,9 +432,73 @@ def _historical_lab_bundle(tmp_path):
     return bundle_dir, "lab-0.2.5", LAB_EVALUATOR_VERSION
 
 
+# A Lab bundle recorded by nandatown at cb19e0e, kept verbatim; see its
+# .provenance.json. It is a fixture, not an adoption.
+GENUINE_HISTORICAL_LAB = (Path(__file__).parent / "fixtures"
+                          / "historical-lab-0.2.0-voting")
+
+
+def _genuine_historical_lab_bundle(tmp_path):
+    """A bundle an older Town really wrote, not a relabelled modern one.
+
+    Relabelling cannot stand in for this. A bundle written today records
+    every field today's model has, so reading it back adds nothing; only
+    a document written before those fields existed shows whether the
+    profile binding survives the model gaining them.
+    """
+    directory = tmp_path / "genuine-historical"
+    shutil.copytree(GENUINE_HISTORICAL_LAB, directory)
+    return str(directory), "lab-0.2.0", LAB_EVALUATOR_VERSION
+
+
+def test_genuine_historical_bundle_is_bound_to_the_document_it_recorded():
+    """The fixture must actually exercise the drift, or it proves nothing."""
+    bundle = load_bundle(str(GENUINE_HISTORICAL_LAB))
+    recorded = bundle["run"].profile_fingerprint
+
+    assert recorded == fingerprint(bundle["profile_document"])
+    assert recorded != fingerprint(bundle["profile"].model_dump())
+    assert set(bundle["profile"].model_dump()) - set(
+        bundle["profile_document"]) == {"plugin_files", "adaptations"}
+
+
+def test_genuine_historical_bundle_verifies_apart_from_its_evaluator(
+        tmp_path):
+    bundle_dir, old, local = _genuine_historical_lab_bundle(tmp_path)
+
+    assert verify_bundle(bundle_dir) == [
+        f"evaluator version differs: bundle {old}, local {local};"
+        " reproducibility not checked"]
+
+
+def test_a_rewritten_historical_profile_is_still_refused(tmp_path):
+    """Rehashing hides the edit from the manifest, not from the binding."""
+    bundle_dir, _, _ = _genuine_historical_lab_bundle(tmp_path)
+    _edit_json(Path(bundle_dir) / "profile.json",
+               lambda profile: profile.update(name="something-else"))
+    _rehash(bundle_dir, "profile.json")
+
+    assert "run profile fingerprint does not match profile" in verify_bundle(
+        bundle_dir)
+    with pytest.raises(ValueError, match="does not match profile"):
+        make_receipt(bundle_dir)
+
+
+def test_an_unmodelled_field_added_to_a_profile_is_refused(tmp_path):
+    """The model would drop this field; the recorded document would not."""
+    bundle_dir, _, _ = _genuine_historical_lab_bundle(tmp_path)
+    _edit_json(Path(bundle_dir) / "profile.json",
+               lambda profile: profile.update(smuggled="payload"))
+    _rehash(bundle_dir, "profile.json")
+
+    assert "run profile fingerprint does not match profile" in verify_bundle(
+        bundle_dir)
+
+
 @pytest.mark.parametrize("historical_bundle",
-                         [_historical_path_bundle, _historical_lab_bundle],
-                         ids=["path", "lab"])
+                         [_historical_path_bundle, _historical_lab_bundle,
+                          _genuine_historical_lab_bundle],
+                         ids=["path", "lab", "genuine-lab"])
 def test_historical_evaluator_bundle_gets_receipt_with_disclosure(
         tmp_path, capsys, historical_bundle):
     bundle_dir, old, local = historical_bundle(tmp_path)

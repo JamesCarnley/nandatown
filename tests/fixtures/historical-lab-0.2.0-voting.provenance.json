@@ -1,0 +1,10 @@
+{
+  "fixture": "historical-lab-0.2.0-voting",
+  "what": "A Lab evidence bundle recorded by nandatown itself, kept so that tests can exercise a bundle whose profile document predates fields the scenario model has gained since.",
+  "produced_by": "nandatown at commit cb19e0ee08872908839b1e12cd1a6cde0a44ab38",
+  "command": "run_lab(\"voting\", out_dir)",
+  "evaluator_version": "lab-0.2.0",
+  "verdict": "passed",
+  "not": "This is a test fixture. It is not an adoption, an endorsement, or evidence that anyone outside this repository ran Town.",
+  "regenerate": "git archive <that commit> into a scratch tree, run the command above with PYTHONPATH pointed at its src, and copy manifest.json, profile.json, run.json, result.json, intents.jsonl and events.jsonl."
+}

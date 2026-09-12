@@ -1,0 +1,60 @@
+{
+  "run_id": "sim-63bcb7ff753b",
+  "evaluator_version": "lab-0.2.0",
+  "stages": [
+    {
+      "name": "ballots",
+      "status": "passed",
+      "evidence": [
+        "ev-35",
+        "ev-37",
+        "ev-39",
+        "ev-41"
+      ],
+      "note": ""
+    },
+    {
+      "name": "one_agent_one_vote",
+      "status": "passed",
+      "evidence": [
+        "ev-44"
+      ],
+      "note": ""
+    },
+    {
+      "name": "tally",
+      "status": "passed",
+      "evidence": [
+        "ev-45"
+      ],
+      "note": ""
+    },
+    {
+      "name": "result_broadcast",
+      "status": "passed",
+      "evidence": [
+        "ev-50",
+        "ev-52",
+        "ev-54",
+        "ev-56"
+      ],
+      "note": ""
+    },
+    {
+      "name": "ledger_conserved",
+      "status": "passed",
+      "evidence": [
+        "ev-6"
+      ],
+      "note": "no money moved"
+    },
+    {
+      "name": "privacy",
+      "status": "not_tested",
+      "evidence": [],
+      "note": "no redaction declared by this scenario"
+    }
+  ],
+  "verdict": "passed",
+  "evaluated_at": 1789238168.419944
+}
