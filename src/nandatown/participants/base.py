@@ -92,10 +92,14 @@ class Journal:
         return json.loads(row[0]) if row else None
 
     def unreported(self, message_id: str) -> bool:
-        """Whether this participant ever saw an ack of this accepted.
+        """Whether this participant still has to report this application.
 
-        False is conclusive: one was accepted. True is not, so a caller
-        must not read it as the town holding no record.
+        False covers three cases and does not distinguish them: an ack
+        was accepted, this journal has never seen the message, or the row
+        predates the mark. True says only that this participant never saw
+        an ack of it accepted, which is weaker than the town holding no
+        record: the ack may have been accepted and the process died
+        before hearing so. Only the town can tell those apart.
         """
         with self._conn() as conn:
             row = conn.execute(

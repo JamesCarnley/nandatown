@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from nandatown.client import TownClient
 from nandatown.participants import seller
+from nandatown.participants.base import Journal
 
 from test_participants import ADMIN, make_town, quote_profile
 
@@ -246,3 +247,62 @@ def test_a_run_ending_that_way_still_passes(tmp_path):
     processed = next(s for s in result.stages if s.name == "processed")
     assert "applied 2 times" not in (processed.note or ""), detail
     assert processed.status == "passed", detail
+
+
+def test_a_duplicate_delivery_means_the_town_recorded_an_ack(tmp_path):
+    """The invariant the seller's suppression rests on.
+
+    The seller stops reporting its application when a delivery is marked
+    duplicate, because the town re-offers only work it has completed. If
+    that ever stopped being true, a correct seller would be recorded as
+    having no application record.
+    """
+    from nandatown.db import TownDB
+    from nandatown.records import fingerprint
+
+    body = {"sku": "widget", "quantity": 2, "unit_price_cents": 1995}
+    db = TownDB(str(tmp_path / "town.db"))
+    run_id = db.create_run(quote_profile().model_dump_json(), now=100.0)
+    db.add_participant(run_id, "buyer", "buyer", [], "tok-b")
+    db.add_participant(run_id, "seller", "seller", ["quote.read"], "tok-s")
+    db.accept_message(run_id, "buyer", "q-1", "seller", "quote_request",
+                      body, fingerprint(body), now=100.0)
+
+    # Accepted, and then claimed, is not completed.
+    assert db.reoffer(run_id, "q-1", "seller", 5.0, 101.0) is None
+    claim = db.claim_next(run_id, "seller", 5.0, 102.0)
+    assert db.reoffer(run_id, "q-1", "seller", 5.0, 103.0) is None
+
+    db.ack(run_id, "seller", "q-1", claim["fence"], "processed",
+           {"applied": True}, 104.0)
+    offered = db.reoffer(run_id, "q-1", "seller", 5.0, 105.0)
+    assert offered is not None and offered["duplicate"] is True
+
+
+def test_a_settled_duplicate_is_not_reported_on_a_later_delivery(tmp_path):
+    """Once suppressed, the decision stays made.
+
+    The seller concluded from the duplicate delivery that the town holds
+    its application. Nothing later should reopen that question, whatever
+    brings the message back.
+    """
+    app, admin, run_id, tokens = make_town(tmp_path,
+                                           fault="duplicate_delivery")
+    send_quote_request(app, run_id, tokens)
+    state = tmp_path / "seller"
+    state.mkdir()
+
+    def die_after_accept(inner):
+        def ack(message_id, fence, status, note=None):
+            inner(message_id, fence, status, note)
+            raise Killed("the acknowledgement landed; the mark did not")
+
+        return ack
+
+    with pytest.raises(Killed):
+        run_seller(app, run_id, tokens, state, ack=die_after_accept)
+    run_seller(app, run_id, tokens, state)
+
+    journal = Journal(str(state / "journal.db"))
+    assert journal.seen("q-1")
+    assert journal.unreported("q-1") is False

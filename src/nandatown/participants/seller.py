@@ -35,7 +35,14 @@ def build_handler(client: TownClient, journal: Journal):
             # and say so, without applying again.
             done = journal.get(message_id)
             note = {"duplicate": True}
-            if journal.unreported(message_id) and not claim.get("duplicate"):
+            if journal.unreported(message_id) and claim.get("duplicate"):
+                # The town only re-offers work it has already completed
+                # (Db.reoffer requires status 'done'), so its record holds
+                # this application and the mark is merely stale. Settle
+                # that here rather than leave the question open for a
+                # later delivery to answer differently.
+                journal.mark_reported(message_id)
+            if journal.unreported(message_id):
                 # The application happened, and this seller never saw an
                 # acknowledgement of it accepted: the fence died first, or
                 # this seller did. Report the work actually done rather
@@ -43,11 +50,9 @@ def build_handler(client: TownClient, journal: Journal):
                 #
                 # Not seeing one accepted is not the same as the town
                 # holding no record, though, and the town says which this
-                # is. It re-offers only work it has already completed, so
-                # a duplicate delivery means the record has the
-                # application and the seller merely died before it could
-                # note that down. Re-reporting there would turn one
-                # application into two.
+                # is: the delivery above already settled the case where
+                # it does. What is left is work the town is still waiting
+                # to hear about.
                 note["applied"] = True
                 note["total_cents"] = done["total_cents"]
             return "processed", note, [done["reply"]]
