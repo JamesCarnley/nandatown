@@ -181,8 +181,10 @@ def _is_endpoint_url(value: object) -> bool:
     Parsing a URL is not the same as being able to read its parts. httpx
     decodes a punycode hostname only when the host is asked for, and a
     malformed A-label such as ``xn--`` raises there instead. So the parts
-    are read inside the guard, and a host that will not decode makes the
-    URL unusable rather than a crash.
+    are read inside the guard, and a hostname that will not decode makes
+    the URL unusable rather than a crash. httpx decodes only a hostname
+    that begins with ``xn--``, so ``localhost.xn--a`` is still accepted
+    here and fails later, as a subject that cannot be reached.
     """
     if not isinstance(value, str) or any(ch.isspace() for ch in value):
         return False

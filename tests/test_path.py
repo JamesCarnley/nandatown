@@ -389,12 +389,22 @@ def test_unusable_index_url_fails_resolution_not_card_retrieval(tmp_path,
 @pytest.mark.parametrize("url", [
     pytest.param("http://127.0.0.1:9\n", id="trailing-newline"),
     pytest.param("http://" + "a" * 1_000_000, id="one-megabyte"),
-    pytest.param("http://xn--.localhost:9", id="empty-a-label"),
-    pytest.param("http://xn--a.localhost:9", id="undecodable-a-label"),
 ])
 def test_url_httpx_rejects_fails_resolution_without_traceback(tmp_path,
                                                              url):
     """Without an injected client these reached httpx and raised."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"))
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+
+
+@pytest.mark.parametrize("url", MALFORMED_A_LABEL_URLS)
+def test_malformed_a_label_without_a_client_fails_resolution(tmp_path, url):
+    """httpx accepts these; reading the host is what raises.
+
+    The other malformed-label test injects a client, so this is the one
+    that proves the real httpx path does not traceback.
+    """
     bundle_dir, result = run_path_test(url, str(tmp_path / "runs"))
 
     _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
