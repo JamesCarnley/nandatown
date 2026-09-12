@@ -120,13 +120,19 @@ def _stop_signals_held():
         # place for SIGTERM. The mask is per thread, so this covers a caller
         # without other threads, such as the CLI. No process starts while
         # the signals are blocked, so none inherits the blocked mask.
+        # Blocking is what makes the restores atomic, but restoring is what
+        # makes holding safe at all. So a failure to block still restores,
+        # unblocked: a caller that catches it keeps its own handlers rather
+        # than the recording ones, which would swallow every later stop.
         mask = None
         try:
-            if saved and hasattr(signal, "pthread_sigmask"):
-                mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
-                signal.pthread_sigmask(signal.SIG_BLOCK, list(saved))
-            for signum, previous in saved.items():
-                signal.signal(signum, previous)
+            try:
+                if saved and hasattr(signal, "pthread_sigmask"):
+                    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+                    signal.pthread_sigmask(signal.SIG_BLOCK, list(saved))
+            finally:
+                for signum, previous in saved.items():
+                    signal.signal(signum, previous)
         finally:
             if mask is not None:
                 signal.pthread_sigmask(signal.SIG_SETMASK, mask)

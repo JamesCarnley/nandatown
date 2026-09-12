@@ -317,6 +317,45 @@ def test_holding_unblocks_stop_signals_when_blocking_them_raises(
             signal.signal(signum, handler)
 
 
+def test_holding_restores_caller_handlers_when_blocking_them_raises(
+        monkeypatch):
+    # The block that puts the caller's handlers back is what makes holding
+    # them safe, so a failure to block first must not skip it: an embedding
+    # caller that catches the error would otherwise keep the recording
+    # handlers and silently lose every later cancellation.
+    def block_then_raise(how, signals):
+        previous = signal.pthread_sigmask(how, signals)
+        if how == signal.SIG_BLOCK and signals:
+            raise _Interrupted
+        return previous
+
+    instrumented = types.ModuleType("signal")
+    instrumented.__dict__.update(vars(signal))
+    instrumented.pthread_sigmask = block_then_raise
+    delivered = []
+    callers = {signum: (lambda s, _frame: delivered.append(s))
+               for signum in (signal.SIGINT, signal.SIGTERM)}
+    previous = {signum: signal.getsignal(signum) for signum in callers}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    try:
+        for signum, handler in callers.items():
+            signal.signal(signum, handler)
+        monkeypatch.setattr(runner, "signal", instrumented)
+        with pytest.raises(_Interrupted):
+            with runner._stop_signals_held():
+                pass
+
+        for signum, handler in callers.items():
+            assert signal.getsignal(signum) is handler
+        for signum in callers:
+            signal.raise_signal(signum)
+        assert delivered == [signal.SIGINT, signal.SIGTERM]
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
 def test_holding_leaves_a_callers_blocked_stop_signal_blocked():
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])
     try:
