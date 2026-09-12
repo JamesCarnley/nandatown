@@ -77,8 +77,14 @@ def test_cli_prints_join_credentials_through_a_pipe_while_waiting(
                 break
         assert cli.poll() is None, "credentials arrived after the run ended"
         assert set(exports) == {"TOWN_URL", "RUN_ID", "NAME", "TOKEN",
-                                "STATE_DIR"}
+                                "STATE_DIR", "DEADLINE"}
         assert exports["NAME"] == "seller"
+        # How long the run will wait is a fact about the run, and an
+        # outside agent has no other way to learn it. FAULT is not handed
+        # over: an outside agent is the subject, not one of this town's
+        # scripted participants.
+        assert float(exports["DEADLINE"]) > 0
+        assert "FAULT" not in exports
         agent = subprocess.Popen(
             [sys.executable, EXAMPLE], env={**os.environ, **exports},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

@@ -770,8 +770,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Track profile for --cmd/--wait (default: quote-clean)")
     p_test.add_argument("--cmd", default=None,
                         help="command that starts your agent (it receives"
-                             " TOWN_URL, RUN_ID, NAME, TOKEN, STATE_DIR"
-                             " in its environment)")
+                             " TOWN_URL, RUN_ID, NAME, TOKEN, STATE_DIR,"
+                             " DEADLINE in its environment)")
     p_test.add_argument("--wait", action="store_true",
                         help="print join credentials and wait for your"
                              " agent to connect from outside")

@@ -479,15 +479,27 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
         buyer_deadline = str(wait_timeout - 15)
 
         def hand_off(role: str, state_dir: str) -> None:
-            """Credentials for an agent that joins from outside: the same
-            environment a spawned participant gets. A role pinned to a
-            portable identity also receives its Run Grant, which is the
-            only credential the town will accept from it."""
+            """Credentials for an agent that joins from outside.
+
+            The same environment a spawned participant gets, less FAULT.
+            An outside agent is the subject, and FAULT is how this town
+            tells its own scripted participants to misbehave on cue; a
+            subject is observed, not instructed to fail. DEADLINE is
+            handed over, because how long this run will wait is a fact
+            about the run and the outside agent has no other way to know
+            it.
+
+            A role pinned to a portable identity also receives its Run
+            Grant, which is the only credential the town will accept
+            from it.
+            """
             if on_credentials is None:
                 return
             os.makedirs(state_dir, exist_ok=True)
             env = {"TOWN_URL": url, "RUN_ID": run_id, "NAME": role,
-                   "TOKEN": tokens[role], "STATE_DIR": state_dir}
+                   "TOKEN": tokens[role], "STATE_DIR": state_dir,
+                   "DEADLINE": (seller_deadline if role == "seller"
+                                else buyer_deadline)}
             if role in grants:
                 env["TOWN_GRANT"] = grants[role]
             on_credentials(role, env)
