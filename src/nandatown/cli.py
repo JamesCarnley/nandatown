@@ -413,25 +413,23 @@ def cmd_receipt(args: argparse.Namespace) -> int:
     return 0
 
 
-def _receipt_replay_disclosures(receipt_path, read_disclosures) -> list[str]:
-    """What a verified receipt states about its own evaluator replay."""
-    import json
+def _receipt_replay_disclosures(receipt_path: str) -> list[str]:
+    """What a verified receipt states about its own evaluator replay.
 
-    try:
-        with open(receipt_path, encoding="utf-8") as f:
-            receipt = json.load(f)
-    except (OSError, ValueError):
+    Read with the receipt module's own loader, so this sees the document
+    the way verification saw it.
+    """
+    from .receipt import _load_receipt_document, replay_disclosures
+
+    receipt, problem = _load_receipt_document(receipt_path)
+    if problem or not isinstance(receipt, dict):
         return []
-    payload = receipt.get("payload") if isinstance(receipt, dict) else None
-    return read_disclosures(payload) if isinstance(payload, dict) else []
+    payload = receipt.get("payload")
+    return replay_disclosures(payload) if isinstance(payload, dict) else []
 
 
 def cmd_verify_receipt(args: argparse.Namespace) -> int:
-    from .receipt import (
-        bundle_receipt_check,
-        replay_disclosures,
-        verify_receipt,
-    )
+    from .receipt import bundle_receipt_check, verify_receipt
 
     problems = verify_receipt(args.receipt, bundle_dir=args.bundle)
     if not problems:
@@ -444,10 +442,11 @@ def cmd_verify_receipt(args: argparse.Namespace) -> int:
                 print(disclosure)
         else:
             # Without the bundle there is nothing to re-check, so what the
-            # receipt says about its own basis is all a reader has.
-            for stated in _receipt_replay_disclosures(args.receipt,
-                                                      replay_disclosures):
-                print(stated)
+            # receipt says about its own basis is all a reader has. It is
+            # said by the receipt, not by this command, and is labelled
+            # that way: a receipt is written by whoever signed it.
+            for stated in _receipt_replay_disclosures(args.receipt):
+                print("receipt states:", stated)
         print("commitment is not truth, independence, or safety")
         return 0
     for p in problems:

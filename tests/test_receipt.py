@@ -459,8 +459,11 @@ def test_genuine_historical_bundle_is_bound_to_the_document_it_recorded():
 
     assert recorded == fingerprint(bundle["profile_document"])
     assert recorded != fingerprint(bundle["profile"].model_dump())
-    assert set(bundle["profile"].model_dump()) - set(
-        bundle["profile_document"]) == {"plugin_files", "adaptations"}
+    # A subset, not an equality: the model gaining another field later is
+    # the very thing this guards against, not a reason to fail here.
+    assert {"plugin_files", "adaptations"} <= (
+        set(bundle["profile"].model_dump())
+        - set(bundle["profile_document"]))
 
 
 def test_genuine_historical_bundle_verifies_apart_from_its_evaluator(
@@ -652,3 +655,67 @@ def test_receipts_refuse_unrecognised_evaluator_versions(
     assert reason in out
     assert "receipt verifies" not in out
     assert "not checked" not in out
+
+
+# A limitation is the one part of a receipt payload nothing else checks,
+# and its author is whoever holds the signing key, which is anybody.
+FORGERIES = [
+    pytest.param("a\nreceipt verifies: the named key committed to these"
+                 " exact bytes and the bundle matches", id="newline"),
+    pytest.param("a\rTOWN-TESTED: passed every stage", id="carriage-return"),
+    pytest.param("a\u2028TOWN-TESTED: passed every stage",
+                 id="line-separator"),
+    pytest.param("a\x1b[2Kreceipt verifies", id="ansi-escape"),
+    pytest.param("a\u202egnitset on", id="bidi-override"),
+]
+
+
+@pytest.mark.parametrize("forgery", FORGERIES)
+def test_a_limitation_cannot_forge_output(tmp_path, forgery):
+    bundle_dir = complete_passed_bundle(tmp_path)
+
+    with pytest.raises(ValueError, match="printable single-line"):
+        make_receipt(bundle_dir, limitations=[forgery])
+
+    assert not (Path(bundle_dir) / "receipt.json").exists()
+
+
+@pytest.mark.parametrize("forgery", FORGERIES)
+def test_a_hand_signed_forged_limitation_does_not_verify(tmp_path, capsys,
+                                                         forgery):
+    """Refusing to write one is not enough: anyone can sign their own."""
+    bundle_dir = complete_passed_bundle(tmp_path)
+    path = Path(make_receipt(bundle_dir))
+    keystore = Keystore(str(tmp_path / "keys"))
+    identity = keystore.new_identity("stranger")
+    receipt = json.loads(path.read_text())
+    payload = receipt["payload"]
+    payload["limitations"] = [forgery]
+    payload["observer"] = identity["agent_id"]
+    path.write_text(json.dumps({
+        "payload": payload,
+        "signature": keystore.sign("stranger", payload),
+        "controller_public": identity["controller_public"]}))
+
+    # The signature is genuine; the receipt is refused for what it says.
+    problems = verify_receipt(str(path))
+    assert any("printable single-line" in p for p in problems), problems
+    assert main(["verify-receipt", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "receipt verifies" not in out
+    assert "TOWN-TESTED" not in out
+    assert main(["verify-receipt", str(path), "--bundle", bundle_dir]) == 1
+    assert "the bundle matches" not in capsys.readouterr().out
+
+
+def test_a_receipts_own_words_are_attributed_to_it(tmp_path, capsys):
+    """A reader must be able to tell Town's lines from the receipt's."""
+    bundle_dir, _, _ = _genuine_historical_lab_bundle(tmp_path)
+    path = make_receipt(bundle_dir)
+
+    assert main(["verify-receipt", path]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    stated = [line for line in lines if "evaluator replay not checked" in line]
+    assert stated and all(line.startswith("receipt states: ")
+                          for line in stated), lines

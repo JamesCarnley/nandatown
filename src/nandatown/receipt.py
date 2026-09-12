@@ -68,7 +68,17 @@ def _field_set_problems(value: dict[str, Any], label: str,
 
 
 def _nonempty_string(value: Any) -> bool:
-    return isinstance(value, str) and bool(value.strip())
+    """A string a reader can be shown on one line, as written.
+
+    Anything a receipt says may be printed beside what the verifier
+    itself says. A newline would let a receipt's own author write extra
+    output lines, and a bidi or other format character would let them
+    reorder or hide one, so a receipt carrying either does not verify.
+    str.isprintable is False for exactly those: control, format,
+    surrogate and line or paragraph separator characters.
+    """
+    return (isinstance(value, str) and bool(value.strip())
+            and value.isprintable())
 
 
 def _receipt_shape_problems(receipt: dict[str, Any],
@@ -131,14 +141,15 @@ def _receipt_shape_problems(receipt: dict[str, Any],
             if not isinstance(values, list) \
                     or any(not _nonempty_string(value) for value in values):
                 problems.append(
-                    f"receipt coverage {name} must be a list of"
-                    " non-empty strings")
+                    f"receipt coverage {name} must be a list of non-empty"
+                    " printable single-line strings")
 
     limitations = payload.get("limitations")
     if not isinstance(limitations, list) or not limitations \
             or any(not _nonempty_string(value) for value in limitations):
         problems.append(
-            "receipt limitations must be a non-empty list of non-empty strings")
+            "receipt limitations must be a non-empty list of non-empty"
+            " printable single-line strings")
 
     evidence = payload.get("evidence")
     if not isinstance(evidence, dict):
@@ -312,6 +323,15 @@ def make_receipt(bundle_dir: str, keystore=None,
     # rather than replacing them: it is one more thing that is true of this
     # receipt, and a caller cannot drop it by supplying its own list.
     stated = list(limitations or DEFAULT_LIMITATIONS)
+    unprintable = [value for value in stated if not _nonempty_string(value)]
+    if unprintable:
+        raise ValueError(
+            "refusing to write receipt: a limitation must be a non-empty"
+            " printable single-line string, so that stating one cannot"
+            f" forge output; refused {unprintable[0][:60]!r}"
+            if isinstance(unprintable[0], str) else
+            "refusing to write receipt: a limitation must be a non-empty"
+            " printable single-line string")
     if disclosure:
         stated.append(disclosure)
     payload = {
@@ -338,8 +358,14 @@ def verify_receipt(receipt_path: str,
     receipt claim. An empty result means the receipt verifies, not that
     the result was replayed; a receipt over a bundle recorded by a known
     earlier evaluator version states that among its limitations, and
-    replay_disclosures reads it back. Limitations are not compared with
-    the bundle: they record what was true when the receipt was signed."""
+    replay_disclosures reads it back.
+
+    Limitations are not compared with the bundle. They record what was
+    true when the receipt was signed, and a later Town upgrade must not
+    make an honest receipt verify as wrong. So an empty result does not
+    say that a receipt's limitations are complete either: for what is
+    true of a bundle now, call bundle_receipt_check on it, as the
+    `verify-receipt --bundle` command does."""
     from .identity_portable import verify_signature
 
     problems: list[str] = []
