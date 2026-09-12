@@ -114,6 +114,29 @@ def _response_mismatch(responses: list[TownEvent],
                       f" request is {accepted}")
 
 
+def _names_request(response: TownEvent, request_id: str) -> bool:
+    """Whether this accepted response says it answers this request.
+
+    The same correlation the response stage judges, asked of one
+    request: verbatim when the town recorded the request_id itself, and
+    by fingerprint when it recorded a bounded digest instead.
+    """
+    detail = response.detail
+    if CORRELATION_FIELD in detail:
+        named = detail[CORRELATION_FIELD]
+        return isinstance(named, str) and named == request_id
+    digest = detail.get(CORRELATION_DIGEST_FIELD)
+    return (isinstance(digest, dict) and digest.get("type") == "string"
+            and digest.get("fingerprint") == fingerprint(request_id))
+
+
+def _name_requests(ids: list[str]) -> str:
+    """Name the requests a stage did not reach, without unbounded text."""
+    shown = [_show_value(i) for i in ids[:3]]
+    rest = len(ids) - len(shown)
+    return ", ".join(shown) + (f" and {rest} more" if rest else "")
+
+
 def _asserted(note: object, field: str) -> bool | None:
     """The boolean a participant asserted for field, or None for no
     assertion this evaluator can read.
@@ -181,6 +204,9 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
     # Only the current rules require a flag to be a boolean. Earlier ones
     # read truthiness, and a bundle they recorded still replays that way.
     strict_flags = version == EVALUATOR_VERSION
+    # Earlier rules judged only the first accepted request, so a second one
+    # that nobody answered did not affect the verdict.
+    judges_every_request = version == EVALUATOR_VERSION
     seller = next((n for n, r in profile.roles.items() if r == "seller"), "seller")
     buyer = next((n for n, r in profile.roles.items() if r == "buyer"), "buyer")
 
@@ -412,6 +438,45 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
             stages.append(_missing(
                 "truncation_survived",
                 "no participant reported a context truncation"))
+
+    # Every accepted request, not only the first. A buyer that asked twice
+    # and was answered once has not had its exchange completed, and saying
+    # so is the difference between reporting on the run and reporting on
+    # the part of it that went well. The stages above already judged the
+    # first request; these downgrade one that passed there while another
+    # accepted request never reached it. A stage that already found
+    # something more specific keeps that finding.
+    if judges_every_request and len(accepted_req) > 1:
+        by_stage: dict[str, list[str]] = {
+            "claimed": [], "received": [], "processed": [], "response": []}
+        for event in accepted_req:
+            other = event.subject
+            acks = find("ack_recorded", observer=seller, subject=other)
+            if not find("message_claimed", subject=other):
+                by_stage["claimed"].append(other)
+            if not [a for a in acks
+                    if a.detail.get("status") in ("received", "processed")]:
+                by_stage["received"].append(other)
+            if not [a for a in acks
+                    if a.detail.get("status") == "processed"
+                    and _asserted(a.detail.get("note"), "applied") is True]:
+                by_stage["processed"].append(other)
+            if not [r for r in accepted_resp if _names_request(r, other)]:
+                by_stage["response"].append(other)
+        unfinished = {
+            "claimed": "was never claimed",
+            "received": "was never acknowledged by the seller",
+            "processed": "has no application record",
+            "response": "was never answered",
+        }
+        for index, existing in enumerate(stages):
+            names = by_stage.get(existing.name)
+            if not names or existing.status != "passed":
+                continue
+            stages[index] = _missing(
+                existing.name,
+                f"accepted request {_name_requests(names)}"
+                f" {unfinished[existing.name]}")
 
     verified = find("portable_identity_verified")
     if verified:
