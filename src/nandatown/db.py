@@ -490,7 +490,16 @@ class TownDB:
 
     def reoffer(self, run_id: str, message_id: str, claimant: str,
                 lease_seconds: float, now: float) -> dict[str, Any] | None:
-        """Offer already-completed work one more time (duplicate delivery)."""
+        """Offer already-completed work one more time (duplicate delivery).
+
+        Completed is load-bearing, not incidental. A participant reads
+        ``duplicate`` on a claim as this town having recorded an
+        acknowledgement of that message, which is true only while this
+        stays restricted to 'done'; the seller uses it to decide whether
+        an application of its own still needs reporting. Re-offering
+        work that has merely been delivered would be a different thing
+        and would need a different name.
+        """
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             self._require_open(conn, run_id)

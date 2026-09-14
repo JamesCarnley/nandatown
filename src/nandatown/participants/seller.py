@@ -33,8 +33,29 @@ def build_handler(client: TownClient, journal: Journal):
             # Already applied: resend the original response (idempotent by
             # message identity, the town returns the original acceptance)
             # and say so, without applying again.
-            reply = journal.get(message_id)["reply"]
-            return "processed", {"duplicate": True}, [reply]
+            done = journal.get(message_id)
+            note = {"duplicate": True}
+            if journal.unreported(message_id) and claim.get("duplicate"):
+                # The town only re-offers work it has already completed
+                # (Db.reoffer requires status 'done'), so its record holds
+                # this application and the mark is merely stale. Settle
+                # that here rather than leave the question open for a
+                # later delivery to answer differently.
+                journal.mark_reported(message_id)
+            if journal.unreported(message_id):
+                # The application happened, and this seller never saw an
+                # acknowledgement of it accepted: the fence died first, or
+                # this seller did. Report the work actually done rather
+                # than let the evidence blame the seller for the timing.
+                #
+                # Not seeing one accepted is not the same as the town
+                # holding no record, though, and the town says which this
+                # is: the delivery above already settled the case where
+                # it does. What is left is work the town is still waiting
+                # to hear about.
+                note["applied"] = True
+                note["total_cents"] = done["total_cents"]
+            return "processed", note, [done["reply"]]
         body = claim["body"]
         total_cents = body["quantity"] * body["unit_price_cents"]
         reply = {
@@ -45,8 +66,11 @@ def build_handler(client: TownClient, journal: Journal):
                      "quantity": body["quantity"],
                      "total_cents": total_cents},
         }
+        # The application and the mark saying the town has not recorded it
+        # commit together, before the acknowledgement is even attempted.
         journal.record(message_id, {"reply": reply,
-                                    "total_cents": total_cents})
+                                    "total_cents": total_cents},
+                       unreported=True)
         return "processed", {"applied": True, "total_cents": total_cents}, [reply]
 
     return handler
@@ -73,6 +97,22 @@ def crash_wrapper(client: TownClient, journal: Journal, state_dir: str,
     return handler
 
 
+def ack_accepted(journal: Journal):
+    """Clear the mark once the record carries the application.
+
+    An accepted acknowledgement is the only proof that an assertion of
+    this seller's own reached the evidence. Until one arrives the
+    application stays marked, and a redelivery of work the town has no
+    completed record of carries it again.
+    """
+    def on_ack_accepted(claim: dict[str, Any],
+                        note: dict[str, Any]) -> None:
+        if note.get("applied"):
+            journal.mark_reported(claim["message_id"])
+
+    return on_ack_accepted
+
+
 def run(client: TownClient, name: str, token: str, state_dir: str,
         fault: str, deadline_seconds: float = 60.0,
         grant_json: str | None = None) -> int:
@@ -83,7 +123,8 @@ def run(client: TownClient, name: str, token: str, state_dir: str,
         lease = float(client.run_context.get("lease_seconds", 5.0))
         handler = crash_wrapper(client, journal, state_dir, lease, handler)
     deadline = time.time() + deadline_seconds
-    run_loop(client, handler, until=lambda: time.time() > deadline)
+    run_loop(client, handler, until=lambda: time.time() > deadline,
+             on_ack_accepted=ack_accepted(journal))
     return 0
 
 

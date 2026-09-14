@@ -113,6 +113,10 @@ class TownClient:
         )
         if r.status_code == 409 and r.json().get("detail", {}).get("error") \
                 == "stale_fence":
+            # The fence is dead, so this attempt acknowledged nothing. The
+            # retry above only follows a 503, which the town raises before
+            # it commits an ack, so a fenced retry never hides an
+            # acknowledgement the town already recorded.
             raise StaleFenceError(fence)
         r.raise_for_status()
         return r.json()
