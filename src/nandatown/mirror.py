@@ -34,7 +34,7 @@ def _fingerprint_of(bundle_dir: str) -> str:
         metadata = os.lstat(manifest_path)
         if not stat.S_ISREG(metadata.st_mode):
             raise MirrorError("manifest.json is not a regular file")
-        with open(manifest_path) as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
         fingerprint = manifest["bundle_fingerprint"]
     except MirrorError:
@@ -116,7 +116,8 @@ def _copy_bundle(bundle_dir: str, destination: str, fingerprint: str) -> None:
             staged_bundle, "copied", expected_fingerprint=fingerprint)
         from .report import render_report
 
-        with open(os.path.join(staged_bundle, "report.md"), "w") as stream:
+        with open(os.path.join(staged_bundle, "report.md"), "w",
+                  encoding="utf-8") as stream:
             stream.write(render_report(load_bundle(staged_bundle)))
         if os.path.lexists(destination):
             raise MirrorError(

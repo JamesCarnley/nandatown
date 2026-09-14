@@ -190,7 +190,7 @@ def _load_receipt_document(path: str) -> tuple[Any | None, str | None]:
     if problem:
         return None, problem
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f), None
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return None, f"receipt unreadable: {exc}"
@@ -353,7 +353,7 @@ def make_receipt(bundle_dir: str, keystore=None,
     receipt = {"payload": payload,
                "signature": keystore.sign(signer, payload),
                "controller_public": identity["controller_public"]}
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(receipt, f, indent=2)
     return path
 
