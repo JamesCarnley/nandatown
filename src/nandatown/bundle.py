@@ -10,6 +10,7 @@ evidence; they never rewrite it.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -19,7 +20,7 @@ import time
 from typing import Any
 
 from . import __version__
-from .evaluator import EVALUATOR_VERSION, evaluate
+from .evaluator import EVALUATOR_VERSION, EVALUATOR_VERSIONS, evaluate
 from .records import (
     EvidenceResult,
     Intent,
@@ -295,8 +296,13 @@ def verify_bundle(directory: str) -> list[str]:
             expected_version = path_evaluator_version(bundle["profile"])
             replay_fn = evaluate_path
         else:
-            expected_version = EVALUATOR_VERSION
-            replay_fn = evaluate
+            # A recorded Track version replays under its own rules; any
+            # other version is reported as a difference below.
+            expected_version = (
+                recorded.evaluator_version
+                if recorded.evaluator_version in EVALUATOR_VERSIONS
+                else EVALUATOR_VERSION)
+            replay_fn = functools.partial(evaluate, version=expected_version)
     except (KeyError, ValueError) as exc:
         expected_version = None
         replay_fn = None

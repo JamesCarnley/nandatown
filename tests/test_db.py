@@ -9,7 +9,7 @@ from contextlib import contextmanager
 import pytest
 
 from nandatown.db import IdentityReuse, StaleFence, TownDB
-from nandatown.records import fingerprint
+from nandatown.records import canonical_json, fingerprint
 
 
 @pytest.fixture()
@@ -144,7 +144,7 @@ def test_retry_from_fresh_process_preserves_acceptance(db, run):
 import json, sys
 from nandatown.db import TownDB
 from nandatown.records import fingerprint
-body = {"quantity": 2, "sku": "widget", "unit_price_cents": 1995}
+body ={"quantity": 2, "sku": "widget", "unit_price_cents": 1995}
 print(json.dumps(TownDB(sys.argv[1]).accept_message(
     sys.argv[2], "buyer", "q-1", "seller", "quote_request", body,
     fingerprint(body), 200.0, suppress_notify=True)))
@@ -503,3 +503,49 @@ def test_events_and_intents_are_ordered(db, run):
     intents = db.intents(run)
     assert intents[0]["action"] == "send"
     assert intents[0]["intent_id"] == "in-1"
+
+
+# A response's request_id is correlation evidence. It is copied verbatim only
+# while it is a short string; anything else is described by a bounded digest
+# that still identifies the full value exactly.
+OVERSIZED_REQUEST_ID = "q-1-" + "x" * 200_000
+
+
+def accepted_response_detail(db, run_id, body):
+    accept(db, run_id, sender="seller", message_id="r-1", to="buyer",
+           kind="quote_response", body=body)
+    return [e for e in db.events(run_id)
+            if e["kind"] == "message_accepted"][-1]["detail"]
+
+
+@pytest.mark.parametrize("request_id", ["q-1", "q-" + "7" * 126])
+def test_short_string_request_id_is_recorded_verbatim(db, run, request_id):
+    detail = accepted_response_detail(
+        db, run, {"request_id": request_id, "total_cents": 3990})
+    assert detail["request_id"] == request_id
+    assert "request_id_digest" not in detail
+
+
+@pytest.mark.parametrize("request_id", [
+    OVERSIZED_REQUEST_ID, "q-" + "7" * 127, None, 7, True, ["q-1"],
+    {"id": "q-1"}],
+    ids=["oversized", "just-over", "null", "number", "boolean", "array",
+         "object"])
+def test_other_request_id_is_recorded_as_a_bounded_digest(db, run, request_id):
+    detail = accepted_response_detail(
+        db, run, {"request_id": request_id, "total_cents": 3990})
+    assert "request_id" not in detail
+    json_type = {str: "string", type(None): "null", int: "number",
+                 bool: "boolean", list: "array", dict: "object"}
+    assert detail["request_id_digest"] == {
+        "type": json_type[type(request_id)],
+        "json_length": len(canonical_json(request_id)),
+        "fingerprint": fingerprint(request_id),
+    }
+    assert len(json.dumps(detail)) < 400
+
+
+def test_body_without_request_id_records_no_correlation(db, run):
+    detail = accepted_response_detail(db, run, {"total_cents": 3990})
+    assert "request_id" not in detail
+    assert "request_id_digest" not in detail

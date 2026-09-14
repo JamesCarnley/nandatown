@@ -86,8 +86,10 @@ the frozen profile and exported events, so `verify` can recompute every hash and
 replay the judgment. In the Lab, privacy redaction runs before
 evaluation, so the recorded result is reproducible from public records
 by construction. Verification compares deterministic evaluation output, not the
-evaluation wall-clock timestamp. A different evaluator version is reported
-explicitly; stored results are not silently upgraded.
+evaluation wall-clock timestamp. Path selects its evaluator from the pinned
+profile; Track replays a recorded `0.2.0` result under the `0.2.0` rules
+alongside the current `0.3.0`. Any other evaluator version difference is
+reported explicitly; stored results are not silently upgraded.
 
 The root commits the five named record files only. Reports, receipts,
 attestations, viewer HTML and participant state are side artifacts. A receipt

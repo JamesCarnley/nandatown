@@ -12,12 +12,34 @@ from __future__ import annotations
 
 import time
 
-from .records import EvidenceResult, StageResult, TestProfile, TownEvent
+from .records import (
+    EvidenceResult,
+    StageResult,
+    TestProfile,
+    TownEvent,
+    canonical_json,
+    fingerprint,
+    json_type,
+)
 
-EVALUATOR_VERSION = "0.2.0"
+EVALUATOR_VERSION = "0.3.0"
+# Recorded bundles replay under the rules that produced them. 0.2.0 took
+# the first accepted quote response; it neither counted responses nor
+# checked which request a response named.
+LEGACY_EVALUATOR_VERSION = "0.2.0"
+EVALUATOR_VERSIONS = (LEGACY_EVALUATOR_VERSION, EVALUATOR_VERSION)
 
 REQUEST_KIND = "quote_request"
 RESPONSE_KIND = "quote_response"
+# The quote.read skill: a quote_response carries the request id. The town
+# records the body's request_id on message_accepted: verbatim while it is a
+# short string, otherwise as a bounded digest (JSON type, JSON text length,
+# fingerprint of the full value) under CORRELATION_DIGEST_FIELD.
+CORRELATION_FIELD = "request_id"
+CORRELATION_DIGEST_FIELD = "request_id_digest"
+JSON_TYPES = ("string", "number", "boolean", "null", "array", "object")
+# A stage note shows at most this many characters of a recorded value.
+NOTE_VALUE_CHARS = 80
 
 
 def _passed(name: str, evidence: list[str], note: str = "") -> StageResult:
@@ -33,8 +55,93 @@ def _missing(name: str, note: str) -> StageResult:
                        note=note)
 
 
-def evaluate(profile: TestProfile, run_id: str,
-             events: list[TownEvent]) -> EvidenceResult:
+def _response_mismatch(responses: list[TownEvent],
+                       requests: list[TownEvent]) -> tuple[str, str] | None:
+    """Why the accepted quote responses cannot stand as the one answer to
+    the accepted request, as (status, note). None when they can, or when
+    there is nothing to judge yet (that stays missing).
+
+    Each distinct message identity is accepted once; an idempotent resend
+    of the same identity and content is a replay, not a second response.
+    """
+    request_id = requests[0].subject if requests else None
+    if len(responses) > 1 and len(requests) > 1:
+        # Not the one exchange the profile expects, but not a seller that
+        # answered one request twice either: say what was accepted.
+        return "failed", (f"{len(requests)} quote requests and"
+                          f" {len(responses)} distinct quote responses were"
+                          " accepted; the profile expects exactly one of each"
+                          " (an idempotent resend of one identity is not"
+                          " counted)")
+    if len(responses) > 1:
+        return "failed", (f"{len(responses)} distinct quote responses were"
+                          " accepted, expected one (an idempotent resend of"
+                          " one identity is not counted)")
+    if not responses or request_id is None:
+        return None
+    detail = responses[0].detail
+    if CORRELATION_FIELD in detail:
+        named = detail[CORRELATION_FIELD]
+        if isinstance(named, str) and named == request_id:
+            return None
+        shape, shown = ("string" if isinstance(named, str) else "other",
+                        _show_value(named))
+    elif CORRELATION_DIGEST_FIELD in detail:
+        digest = detail[CORRELATION_DIGEST_FIELD]
+        if (isinstance(digest, dict) and digest.get("type") == "string"
+                and digest.get("fingerprint") == fingerprint(request_id)):
+            return None
+        shape, shown = _show_digest(digest)
+    else:
+        return "not_enough_evidence", (
+            "the quote response carries no request_id, so it is not shown"
+            " to answer the accepted request")
+    accepted = _show_value(request_id)
+    if shape == "string":
+        return "failed", (f"the quote response names request {shown}, not"
+                          f" the accepted request {accepted}")
+    if shape == "malformed":
+        return "failed", (f"the quote response's recorded request_id digest"
+                          f" {shown} is malformed and names no request; the"
+                          f" accepted request is {accepted}")
+    return "failed", (f"the quote response's request_id is {shown}, which is"
+                      " not a string and names no request; the accepted"
+                      f" request is {accepted}")
+
+
+def _show_value(value: object) -> str:
+    """A recorded value for a stage note: its JSON text when short (JSON
+    null for null), otherwise its first NOTE_VALUE_CHARS characters, its
+    length and its fingerprint. Notes stay small whatever was recorded."""
+    text = canonical_json(value)
+    if not isinstance(value, str):
+        text = ("JSON null" if value is None
+                else f"a JSON {json_type(value)} {text}")
+    if len(text) <= NOTE_VALUE_CHARS:
+        return text
+    return (f"{text[:NOTE_VALUE_CHARS]}… ({len(canonical_json(value))}"
+            f" JSON characters, {fingerprint(value)[:23]}…)")
+
+
+def _show_digest(digest: object) -> tuple[str, str]:
+    """(shape, text) for a recorded request_id digest; shape is string,
+    other or malformed."""
+    if not (isinstance(digest, dict) and digest.get("type") in JSON_TYPES
+            and type(digest.get("json_length")) is int
+            and 0 <= digest["json_length"] < 10 ** 15
+            and isinstance(digest.get("fingerprint"), str)):
+        return "malformed", _show_value(digest)
+    if digest["type"] == "null":
+        return "other", "JSON null"
+    return ("string" if digest["type"] == "string" else "other",
+            f"a JSON {digest['type']} of {digest['json_length']} JSON"
+            f" characters ({digest['fingerprint'][:23]}…)")
+
+
+def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
+             version: str = EVALUATOR_VERSION) -> EvidenceResult:
+    if version not in EVALUATOR_VERSIONS:
+        raise ValueError(f"unsupported Track evaluator version {version!r}")
     seller = next((n for n, r in profile.roles.items() if r == "seller"), "seller")
     buyer = next((n for n, r in profile.roles.items() if r == "buyer"), "buyer")
 
@@ -107,7 +214,18 @@ def evaluate(profile: TestProfile, run_id: str,
     response_id = accepted_resp[0].subject if accepted_resp else None
     buyer_claims = (find("message_claimed", subject=response_id,
                          claimant=buyer) if response_id else [])
-    if accepted_resp and buyer_claims:
+    mismatch = (None if version == LEGACY_EVALUATOR_VERSION
+                else _response_mismatch(accepted_resp, accepted_req))
+    if mismatch is not None and mismatch[0] == "failed":
+        # Several requests are part of why several responses fail.
+        cited = (accepted_req if len(accepted_req) > 1
+                 and len(accepted_resp) > 1 else [])
+        stages.append(_failed("response",
+                              [e.event_id for e in cited + accepted_resp],
+                              mismatch[1]))
+    elif mismatch is not None:
+        stages.append(_missing("response", mismatch[1]))
+    elif accepted_resp and buyer_claims:
         stages.append(_passed("response", [accepted_resp[0].event_id,
                                            buyer_claims[0].event_id]))
     else:
@@ -118,9 +236,24 @@ def evaluate(profile: TestProfile, run_id: str,
     # correct: the buyer's own assertion about the total.
     buyer_acks = (find("ack_recorded", observer=buyer, subject=response_id)
                   if response_id else [])
+    if mismatch is not None:
+        # The assertion may concern any of the responses in question.
+        buyer_acks = [a for r in accepted_resp
+                      for a in find("ack_recorded", observer=buyer,
+                                    subject=r.subject)]
     verdict_acks = [a for a in buyer_acks
                     if "correct" in a.detail.get("note", {})]
-    if verdict_acks:
+    if verdict_acks and mismatch is not None and mismatch[0] == "failed":
+        stages.append(_failed(
+            "correct", [a.event_id for a in verdict_acks],
+            "the buyer's assertion cannot establish the answer to the"
+            f" accepted request: {mismatch[1]}"))
+    elif (verdict_acks and mismatch is not None
+          and verdict_acks[0].detail["note"]["correct"]):
+        stages.append(_missing(
+            "correct", "the buyer's assertion concerns a response not shown"
+                       f" to answer the accepted request: {mismatch[1]}"))
+    elif verdict_acks:
         note = verdict_acks[0].detail["note"]
         if note["correct"]:
             stages.append(_passed("correct", [verdict_acks[0].event_id]))
@@ -234,7 +367,7 @@ def evaluate(profile: TestProfile, run_id: str,
                  " --identity for grant-based portable identity"))
 
     cascade_unreached(stages)
-    return EvidenceResult(run_id=run_id, evaluator_version=EVALUATOR_VERSION,
+    return EvidenceResult(run_id=run_id, evaluator_version=version,
                           stages=stages, verdict=stage_verdict(stages),
                           evaluated_at=time.time())
 

@@ -27,6 +27,23 @@ def fingerprint(obj: Any) -> str:
     return f"sha256:{digest}"
 
 
+def json_type(value: Any) -> str:
+    """The JSON type name of a decoded JSON value."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, (list, tuple)):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return type(value).__name__
+
+
 class QuoteTask(BaseModel):
     model_config = ConfigDict(frozen=True)
 

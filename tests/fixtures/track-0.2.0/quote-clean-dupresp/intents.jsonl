@@ -1,0 +1,7 @@
+{"intent_id": "in-1", "run_id": "run-ab036ff55d1c", "at": 1789082377.343997, "actor": "buyer", "action": "send", "payload": {"message_id": "q-1", "to": "seller", "kind": "quote_request", "body": {"sku": "widget", "quantity": 2, "unit_price_cents": 1995}}}
+{"intent_id": "in-2", "run_id": "run-ab036ff55d1c", "at": 1789082377.350531, "actor": "seller", "action": "claim", "payload": {}}
+{"intent_id": "in-3", "run_id": "run-ab036ff55d1c", "at": 1789082377.353513, "actor": "seller", "action": "send", "payload": {"message_id": "r-1", "to": "buyer", "kind": "quote_response", "body": {"request_id": "q-1", "total_cents": 3990}}}
+{"intent_id": "in-4", "run_id": "run-ab036ff55d1c", "at": 1789082377.35639, "actor": "seller", "action": "send", "payload": {"message_id": "r-1-again", "to": "buyer", "kind": "quote_response", "body": {"request_id": "q-1", "total_cents": 3990}}}
+{"intent_id": "in-5", "run_id": "run-ab036ff55d1c", "at": 1789082377.359085, "actor": "seller", "action": "ack", "payload": {"message_id": "q-1", "fence": "fence-9a3e872603ae4dfaabdb1080f3902e36", "status": "processed", "note": {"applied": true, "total_cents": 3990}}}
+{"intent_id": "in-6", "run_id": "run-ab036ff55d1c", "at": 1789082377.401891, "actor": "buyer", "action": "claim", "payload": {}}
+{"intent_id": "in-7", "run_id": "run-ab036ff55d1c", "at": 1789082377.4060931, "actor": "buyer", "action": "ack", "payload": {"message_id": "r-1", "fence": "fence-40fd782573e940f5bb95957c6b6c34a8", "status": "processed", "note": {"correct": true, "total_cents": 3990, "expected_total_cents": 3990}}}
