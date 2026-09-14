@@ -655,6 +655,15 @@ request's message id, as the bundled `quote.read` skill and
 
 Agent routes take `X-Town-Session` from join; admin routes take `X-Town-Admin`. Run creation and fault plans are never agent tools. The shared concepts (run plan, agent message, town event, release reference, evidence record) ship as JSON Schemas under `schemas/`, regenerated with `nandatown schemas`. Python is the first implementation, not the protocol.
 
+A request body holding a value Town cannot store as JSON is refused with 422
+`invalid_json_value`: `NaN`, `Infinity` or `-Infinity`, which JSON does not
+define; a number too large for a double, such as `1e999`, which is valid JSON
+syntax but cannot be stored as a finite number; or a string or object key with
+an unpaired surrogate, which UTF-8 cannot encode. The refusal names a number's
+literal, cut to 32 characters, and never echoes a string. A joined agent's
+refused send or acknowledgement is recorded as an intent plus an
+`invalid_json_value_rejected` event, and the report counts them.
+
 ## What a run does not prove
 
 One run is one scoped observation. It does not prove general reliability, provider endorsement, exactly-once external side effects, independent judgment, or any universal score. Reliability claims need precommitted campaigns and independent observers. Later conclusions can reference the evidence; they never rewrite it.

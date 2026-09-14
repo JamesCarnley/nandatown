@@ -14,14 +14,17 @@ completed a task; that separation belongs to the evaluator.
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import os
 import secrets
 import time
 import uuid
-from typing import Any
+from typing import Any, NoReturn
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
 from .db import IdentityReuse, RunFinished, StaleFence, TownDB
@@ -29,6 +32,101 @@ from .records import TestProfile, fingerprint
 
 ACK_STATUSES = {"received", "processed", "rejected", "retryable", "failed"}
 FAULT_TARGET_KIND = "quote_request"
+
+
+class InvalidJSONValue(HTTPException):
+    """A request body that parses but holds a value Town cannot store
+    and export as JSON: NaN, Infinity or -Infinity, which JSON (RFC 8259)
+    does not define; a number too large for a double, such as 1e999,
+    which is valid JSON syntax but cannot be stored as a finite number;
+    or a string or object key with an unpaired surrogate, which cannot
+    be encoded as UTF-8. Python's json module accepts all of them;
+    stored, any one would make the run's records impossible to export."""
+
+    REASONS = {
+        "non_finite_number":
+            "NaN, Infinity or a number too large for a double, such as"
+            " 1e999, cannot be stored as a finite number; send a finite"
+            " number",
+        "unpaired_surrogate":
+            "a string or object key holds an unpaired surrogate, which"
+            " cannot be encoded as UTF-8",
+    }
+
+    # The most characters of a refused number's literal that are kept.
+    LITERAL_LIMIT = 32
+
+    def __init__(self, problem: str, literal: str | None = None):
+        # What the evidence records: which problem, and for a number
+        # its literal, cut to LITERAL_LIMIT characters ending in "..."
+        # plus its full length when longer. A refused string is never
+        # echoed.
+        self.evidence: dict[str, Any] = {"problem": problem}
+        if literal is not None and len(literal) > self.LITERAL_LIMIT:
+            self.evidence["literal"] = (
+                literal[:self.LITERAL_LIMIT - 3] + "...")
+            self.evidence["literal_length"] = len(literal)
+        elif literal is not None:
+            self.evidence["literal"] = literal
+        super().__init__(status_code=422, detail={
+            "error": "invalid_json_value", **self.evidence,
+            "reason": self.REASONS[problem]})
+
+
+def _refuse_constant(literal: str) -> NoReturn:
+    raise InvalidJSONValue("non_finite_number", literal)
+
+
+def _finite_float(literal: str) -> float:
+    value = float(literal)
+    if not math.isfinite(value):
+        raise InvalidJSONValue("non_finite_number", literal)
+    return value
+
+
+def _require_utf8(value: Any) -> None:
+    """Every string, key or value, must encode as UTF-8, as it must
+    when the run's records are exported; only a surrogate cannot."""
+    try:
+        json.dumps(value, ensure_ascii=False).encode("utf-8")
+    except UnicodeEncodeError:
+        raise InvalidJSONValue("unpaired_surrogate") from None
+
+
+class StrictJSONRequest(Request):
+    """Parses a JSON body and refuses any value Town cannot store as
+    JSON; every other body parses exactly as it would with the standard
+    parser.
+
+    The body is read before the route's dependencies and handler run,
+    so before its session and grant permission checks. A grant-joined
+    session without the send or ack permission that posts an invalid
+    value is therefore recorded as invalid_json_value_rejected, not
+    grant_permission_denied; both attribute the refusal to that
+    participant."""
+
+    async def json(self) -> Any:
+        if not hasattr(self, "_json"):
+            value = json.loads(await self.body(),
+                               parse_constant=_refuse_constant,
+                               parse_float=_finite_float)
+            _require_utf8(value)
+            self._json = value
+        return self._json
+
+
+class StrictJSONRoute(APIRoute):
+    """The coordinator's one JSON body parser: every route, participant
+    and admin alike, reads its body through StrictJSONRequest."""
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+
+        async def strict_handler(request: Request):
+            return await handler(StrictJSONRequest(request.scope,
+                                                   request.receive))
+
+        return strict_handler
 
 
 class CreateRun(BaseModel):
@@ -67,6 +165,7 @@ class EventBody(BaseModel):
 
 def build_app(db_path: str, admin_token: str) -> FastAPI:
     app = FastAPI(title="nandatown coordinator", version="0.2.0")
+    app.router.route_class = StrictJSONRoute
     db = TownDB(db_path)
     # Fault bookkeeping per run: each fault fires at most once.
     faults: dict[str, dict[str, Any]] = {}
@@ -346,6 +445,36 @@ def build_app(db_path: str, admin_token: str) -> FastAPI:
         except KeyError:
             raise HTTPException(status_code=404, detail="unknown run")
         return {"finished": True}
+
+    # The participant actions that carry a body, by endpoint.
+    body_actions = {send: "send", ack: "ack"}
+
+    @app.exception_handler(InvalidJSONValue)
+    def invalid_json_value(request: Request, exc: InvalidJSONValue):
+        """A joined participant's send or acknowledgement refused for an
+        invalid JSON value is a refused action like any other: recorded
+        as an intent plus an event, while the body itself is never
+        stored. A join, an admin call, an unknown session, or a finished
+        run is refused without writing anything."""
+        action = body_actions.get(request.scope.get("endpoint"))
+        run_id = request.path_params.get("run_id", "")
+        name = (db.session_owner(run_id,
+                                 request.headers.get("x-town-session", ""))
+                if action else None)
+        if name is not None:
+            now = time.time()
+            try:
+                db.record_intent(run_id, actor=name, action=action,
+                                 payload={"error": "invalid_json_value",
+                                          **exc.evidence}, at=now)
+                db.record_event(run_id, observer="town",
+                                kind="invalid_json_value_rejected",
+                                subject=name, at=now,
+                                detail={"action": action, **exc.evidence})
+            except RunFinished:
+                pass
+        return JSONResponse(status_code=exc.status_code,
+                            content={"detail": exc.detail})
 
     return app
 

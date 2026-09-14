@@ -144,9 +144,13 @@ def render_report(bundle: dict[str, Any]) -> str:
     add("")
     refused = sum(1 for e in bundle["events"]
                   if e.kind == "grant_permission_denied")
+    invalid = sum(1 for e in bundle["events"]
+                  if e.kind == "invalid_json_value_rejected")
     add(f"Events recorded: {len(bundle['events'])}."
         f" Intents recorded: {len(bundle['intents'])}."
-        + (f" Refused by grant permissions: {refused}." if refused else ""))
+        + (f" Refused by grant permissions: {refused}." if refused else "")
+        + (f" Refused as invalid JSON values: {invalid}." if invalid
+           else ""))
     add(SCOPE_SENTENCE)
     add("One run is one scoped observation, not a certificate.")
     add("Improve: fix what failed and rerun the same profile.")
