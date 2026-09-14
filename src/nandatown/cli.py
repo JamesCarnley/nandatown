@@ -142,6 +142,13 @@ def cmd_test_agent(args: argparse.Namespace) -> int:
         print("test an already-running agent with --url <endpoint>, or"
               " give a town-joining agent with --cmd \"...\" or --wait")
         return 2
+    from .runner import check_wait_timeout
+
+    try:
+        check_wait_timeout(args.timeout, name="--timeout")
+    except ValueError as exc:
+        print(exc)
+        return 2
     if args.cmd:
         external = {args.role: shlex.split(args.cmd)}
         creds_cb = None
@@ -834,7 +841,12 @@ def main(argv: list[str] | None = None) -> int:
     p_test.add_argument("--wait", action="store_true",
                         help="print join credentials and wait for your"
                              " agent to connect from outside")
-    p_test.add_argument("--timeout", type=float, default=60.0)
+    p_test.add_argument("--timeout", type=float, default=60.0,
+                        help="seconds the --cmd/--wait run may last"
+                             " (default 60; minimum 20 for either role:"
+                             " a buyer Town starts gets a DEADLINE of the"
+                             " timeout minus 15 s, and a buyer needs at"
+                             " least 5 s to request and check a quote)")
     p_test.add_argument("--out", default="runs")
     p_test.set_defaults(func=cmd_test_agent)
 
