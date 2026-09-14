@@ -21,7 +21,9 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from typing import Any
 
 import httpx
@@ -124,6 +126,75 @@ def _spawn_participant(command: list[str], url: str, run_id: str, name: str,
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                             start_new_session=(os.name == "posix"))
+
+
+@contextmanager
+def _stop_signals_held():
+    """Hold SIGINT and SIGTERM until the block ends.
+
+    run_town starts each Town process and records it for cleanup inside
+    this block, so a stop signal cannot unwind run_town between the two and
+    leave that process running. A signal that arrives meanwhile is raised
+    again, for the handler that was in place, when the block ends. An
+    ignored signal stays ignored; outside the main thread, which alone can
+    set handlers, the block runs unguarded.
+    """
+    held: list[int] = []
+    saved: dict[int, Any] = {}
+    try:
+        if threading.current_thread() is threading.main_thread():
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                previous = signal.getsignal(signum)
+                if previous is signal.SIG_IGN or previous is None:
+                    continue
+                saved[signum] = previous
+                signal.signal(signum, lambda s, _frame: held.append(s))
+        yield
+    finally:
+        # Both signals are blocked while their handlers are put back, so one
+        # that arrives meanwhile waits and then reaches its restored handler,
+        # once, when the caller's mask returns. Unblocked, a SIGINT between
+        # the two restores would unwind and leave the recording handler in
+        # place for SIGTERM. The mask is per thread, so this covers a caller
+        # without other threads, such as the CLI. No process starts while
+        # the signals are blocked, so none inherits the blocked mask.
+        # Blocking is what makes the restores atomic, but restoring is what
+        # makes holding safe at all. So a failure to block still restores,
+        # unblocked, and each handler is restored independently: one that
+        # raises, or a signal arriving between two of them while they are
+        # unblocked, must not leave the rest recording into a list this
+        # block has finished with, which would swallow them for good. The
+        # first failure is re-raised once every handler is back.
+        mask = None
+        try:
+            try:
+                if saved and hasattr(signal, "pthread_sigmask"):
+                    mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+                    signal.pthread_sigmask(signal.SIG_BLOCK, list(saved))
+            finally:
+                failure: BaseException | None = None
+                for signum, previous in saved.items():
+                    try:
+                        signal.signal(signum, previous)
+                    except BaseException as exc:  # noqa: BLE001
+                        failure = failure or exc
+                if failure is not None:
+                    raise failure
+        finally:
+            if mask is not None:
+                signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        for signum in dict.fromkeys(held):
+            # If this handler raises, a second held signal is not raised
+            # again; the caller is already unwinding, and its cleanup runs.
+            # A stop signal that arrives during the blocked restores above
+            # is delivered by that mask restore, before this loop, and a
+            # handler that unwinds there drops the held ones the same way:
+            # either path leaves the caller unwinding on an equivalent
+            # signal, and run_town's own cleanup still runs.
+            # A signal wakeup fd, such as an asyncio loop's, sees a held
+            # signal twice, on arrival and here; the TUI runs run_town in
+            # worker threads, where nothing is held.
+            signal.raise_signal(signum)
 
 
 def _stop_process(process: subprocess.Popen, grace: float = 0.5) -> int | None:
@@ -487,17 +558,20 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
     env = {key: os.environ[key] for key in _BUILTIN_ENV_KEYS
            if key in os.environ}
     env["TOWN_ADMIN_TOKEN"] = admin_token
-    coordinator = subprocess.Popen(
-        [sys.executable, "-m", "nandatown.coordinator", "--db", db_path,
-         "--port", str(port)],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=(os.name == "posix"),
-    )
-    procs: list[subprocess.Popen] = [coordinator]
     admin = httpx.Client(base_url=url, timeout=10.0,
                          headers={"X-Town-Admin": admin_token})
+    procs: list[subprocess.Popen] = []
     bundle_dir: str | None = None
     try:
+        with _stop_signals_held():
+            coordinator = subprocess.Popen(
+                [sys.executable, "-m", "nandatown.coordinator",
+                 "--db", db_path, "--port", str(port)],
+                env=env, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=(os.name == "posix"),
+            )
+            procs.append(coordinator)
         _wait_health(admin)
         keystore = None
         create_body: dict[str, Any] = {"profile": profile.model_dump()}
@@ -579,12 +653,13 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
             if seller_cmd is None:
                 hand_off("seller", seller_state)
                 return None
-            p = _spawn_participant(seller_cmd, url, run_id, "seller",
-                                   tokens["seller"], seller_state,
-                                   profile.fault, seller_deadline,
-                                   extra_env=seller_env,
-                                   inherit_env=(seller_kind == "cmd"))
-            procs.append(p)
+            with _stop_signals_held():
+                p = _spawn_participant(seller_cmd, url, run_id, "seller",
+                                       tokens["seller"], seller_state,
+                                       profile.fault, seller_deadline,
+                                       extra_env=seller_env,
+                                       inherit_env=(seller_kind == "cmd"))
+                procs.append(p)
             return p
 
         seller = spawn_seller()
@@ -592,12 +667,13 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
             hand_off("buyer", buyer_state)
             buyer = None
         else:
-            buyer = _spawn_participant(buyer_cmd, url, run_id, "buyer",
-                                       tokens["buyer"], buyer_state,
-                                       profile.fault, buyer_deadline,
-                                       extra_env=buyer_env,
-                                       inherit_env=(buyer_kind == "cmd"))
-            procs.append(buyer)
+            with _stop_signals_held():
+                buyer = _spawn_participant(buyer_cmd, url, run_id, "buyer",
+                                           tokens["buyer"], buyer_state,
+                                           profile.fault, buyer_deadline,
+                                           extra_env=buyer_env,
+                                           inherit_env=(buyer_kind == "cmd"))
+                procs.append(buyer)
 
         restarted = False
         seller_done = False

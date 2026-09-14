@@ -736,6 +736,58 @@ def cmd_ui(args: argparse.Namespace) -> int:
     return 0
 
 
+# Commands whose Track runs start a coordinator and participants in their
+# own sessions and rely on run_town's cleanup to stop them.
+_TOWN_PROCESS_COMMANDS = frozenset({"run", "test-agent", "campaign"})
+
+
+def _call_stopping_on_sigterm(func, args: argparse.Namespace) -> int:
+    """Run a command so that SIGTERM unwinds it the way SIGINT does.
+
+    Python's default SIGTERM disposition ends the process without running
+    ``finally`` blocks, which would orphan the coordinator run_town started
+    in its own session (a CI job timeout, for example). Raising SystemExit
+    instead runs that cleanup; the process then raises SIGTERM again under
+    the default disposition, so its parent still sees it killed by signal
+    15, much as CPython ends by SIGINT after an unhandled KeyboardInterrupt.
+    Non-POSIX platforms, calls from other threads, and an ignored or
+    already-handled SIGTERM keep their behavior.
+    """
+    import os
+    import signal
+    import threading
+
+    if (os.name != "posix"
+            or threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL):
+        return func(args)
+
+    received: list[int] = []
+
+    def stop(signum, _frame):
+        # A repeated SIGTERM must not interrupt the cleanup this starts;
+        # SIGKILL still stops the process at once.
+        signal.signal(signum, signal.SIG_IGN)
+        received.append(signum)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        return func(args)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        if received:
+            # The cleanup has run; end the way SIGTERM always ended this
+            # process. Should the signal somehow not end it, the command's
+            # own outcome, normally SystemExit(143), stands.
+            for stream in (sys.stdout, sys.stderr):
+                try:
+                    stream.flush()
+                except (AttributeError, OSError, ValueError):
+                    pass
+            signal.raise_signal(signal.SIGTERM)
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -1050,6 +1102,8 @@ def main(argv: list[str] | None = None) -> int:
     p_coord.set_defaults(func=cmd_coordinator)
 
     args = parser.parse_args(argv)
+    if args.command in _TOWN_PROCESS_COMMANDS:
+        return _call_stopping_on_sigterm(args.func, args)
     return args.func(args)
 
 
