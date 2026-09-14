@@ -197,7 +197,10 @@ to is inconclusive rather than passed. The fault stages read `tool_errors` and
 `context_truncations` the same way, as integers. It also judges every accepted
 `quote_request`, not only the first: one that was never claimed, acknowledged,
 applied or answered leaves the stage it did not reach inconclusive and the run
-incomplete, naming that request. Town's own buyer sends exactly one request,
+incomplete, naming that request. A request addressed to someone other than
+the seller leaves the seller's own stages alone and is reported under
+`response` instead. One readable `applied: true` beside an unreadable claim
+does not establish application exactly once. Town's own buyer sends exactly one request,
 so this changes nothing for the bundled profiles; it matters when the subject
 is the buyer. Its `response` stage requires exactly one distinct accepted
 `quote_response`, whose body `request_id` names the accepted request; the

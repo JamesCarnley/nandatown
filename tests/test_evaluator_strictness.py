@@ -184,18 +184,81 @@ def test_a_note_that_is_not_an_object_carries_no_assertion(note):
     assert result.verdict != "passed"
 
 
-def test_a_request_for_someone_else_is_not_the_sellers_to_answer():
-    """These stages judge the seller, so only its own requests count."""
+@pytest.mark.parametrize("recipient", ["auditor", "buyer"])
+def test_a_misaddressed_request_is_visible_but_not_the_sellers_fault(
+        recipient):
+    """Every accepted request counts; only the seller's own are its to handle.
+
+    A request addressed to someone else says nothing about how the seller
+    handled its work, so the seller's stages stay as they were. It is still
+    a request this run accepted and nobody answered, and a verdict that
+    passes over it would be a verdict about part of the run.
+    """
     events = clean_events()
     events = events[:4] + [
         ev(5, "message_accepted", "q-2", kind="quote_request",
-           sender="buyer", to="auditor"),
+           sender="buyer", to=recipient),
     ] + events[4:]
 
     result = evaluate(profile(), "run-1", events)
 
-    assert result.verdict == "passed", [
-        (s.name, s.status, s.note) for s in result.stages]
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert result.verdict == "incomplete", detail
+    for name in ("claimed", "received", "processed"):
+        assert stage(result, name).status == "passed", detail
+    response = stage(result, "response")
+    assert response.status == "not_enough_evidence", detail
+    assert '"q-2"' in response.note and "other than the seller" in (
+        response.note), response.note
+
+
+def duplicate_delivery_with(second_note):
+    """A completed request re-offered, and acknowledged a second time."""
+    events = clean_events()
+    return events[:7] + [
+        ev(20, "duplicate_offered", "q-1", fault="duplicate_delivery"),
+        ev(21, "message_claimed", "q-1", claimant="seller", attempt=2),
+        ev(22, "ack_recorded", "q-1", observer="seller", status="processed",
+           note=second_note, attempt=2),
+    ] + events[7:]
+
+
+@pytest.mark.parametrize("value", NOT_A_YES)
+def test_one_readable_application_beside_an_unreadable_one_is_not_once(
+        value):
+    """0.3.0 counted both as truthy and failed. Reading only the boolean
+    and then passing would turn that failure into a pass the evidence does
+    not support: the second claim might be a second application."""
+    events = duplicate_delivery_with({"applied": value, "duplicate": True})
+
+    result = evaluate(profile("duplicate_delivery"), "run-1", events)
+
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert stage(result, "processed").status == "not_enough_evidence", detail
+    assert "exactly once is not established" in stage(
+        result, "processed").note
+    assert stage(result, "duplicate_recognized").status != "passed", detail
+    assert result.verdict != "passed", detail
+
+
+def test_two_real_applications_still_fail():
+    events = duplicate_delivery_with({"applied": True, "duplicate": True})
+
+    result = evaluate(profile("duplicate_delivery"), "run-1", events)
+
+    assert stage(result, "processed").status == "failed"
+    assert result.verdict == "failed"
+
+
+def test_the_stock_duplicate_acknowledgement_still_passes():
+    """The shipped seller says duplicate and nothing about applied."""
+    events = duplicate_delivery_with({"duplicate": True})
+
+    result = evaluate(profile("duplicate_delivery"), "run-1", events)
+
+    detail = [(s.name, s.status, s.note) for s in result.stages]
+    assert stage(result, "processed").status == "passed", detail
+    assert stage(result, "duplicate_recognized").status == "passed", detail
 
 
 def test_a_response_naming_another_accepted_request_says_which_it_judged():
@@ -210,3 +273,21 @@ def test_a_response_naming_another_accepted_request_says_which_it_judged():
     note = stage(evaluate(profile(), "run-1", events), "response").note
 
     assert "the first accepted request" in note, note
+
+
+def test_that_wording_is_0_4_0s_and_0_3_0_replays_its_own():
+    """verify compares the whole replayed result, notes included, so a
+    0.3.0 bundle must get back exactly the text 0.3.0 wrote."""
+    events = two_requests_one_answered()
+    events = [e.model_copy(update={"detail": dict(e.detail,
+                                                  request_id="q-2")})
+              if e.kind == "message_accepted" and e.subject == "r-1"
+              else e
+              for e in events]
+
+    replayed = evaluate(profile(), "run-1", events,
+                        version=CORRELATION_EVALUATOR_VERSION)
+
+    assert stage(replayed, "response").note == (
+        'the quote response names request "q-2", not the accepted'
+        ' request "q-1"')

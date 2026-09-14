@@ -61,7 +61,8 @@ def _missing(name: str, note: str) -> StageResult:
 
 
 def _response_mismatch(responses: list[TownEvent],
-                       requests: list[TownEvent]) -> tuple[str, str] | None:
+                       requests: list[TownEvent],
+                       name_first: bool = False) -> tuple[str, str] | None:
     """Why the accepted quote responses cannot stand as the one answer to
     the accepted request, as (status, note). None when they can, or when
     there is nothing to judge yet (that stays missing).
@@ -106,7 +107,11 @@ def _response_mismatch(responses: list[TownEvent],
         # With several accepted requests, say which one this is measured
         # against: naming it "the accepted request" would read as a claim
         # that the one the response named is not accepted.
-        against = ("the first accepted request" if len(requests) > 1
+        # name_first is the 0.4.0 wording. A 0.3.0 bundle has to replay
+        # to the text it recorded, byte for byte, or verify reports a
+        # mismatch over a result nobody changed.
+        against = ("the first accepted request"
+                   if name_first and len(requests) > 1
                    else "the accepted request")
         return "failed", (f"the quote response names request {shown}, not"
                           f" {against} {accepted}")
@@ -290,20 +295,27 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                   else [])
     if not processed:
         stages.append(_missing("processed", "no processed acknowledgement"))
-    elif len(applied) == 1:
-        stages.append(_passed("processed", [applied[0].event_id]))
-    elif len(applied) == 0 and unreadable:
+    elif len(applied) > 1:
+        stages.append(_failed("processed", [a.event_id for a in applied],
+                              f"applied {len(applied)} times, expected once"))
+    elif unreadable:
+        # Exactly once needs every application claim read, not just one.
+        # A readable yes beside an unreadable claim could be one
+        # application or two, and passing it would pick the answer the
+        # evidence does not give.
+        what = ("a processed acknowledgement" if not applied else
+                "another processed acknowledgement")
         stages.append(_missing(
             "processed",
-            _flag_note(unreadable, "applied",
-                       "a processed acknowledgement")))
-    elif len(applied) == 0:
+            _flag_note(unreadable, "applied", what)
+            + ("" if not applied else
+               ", so application exactly once is not established")))
+    elif len(applied) == 1:
+        stages.append(_passed("processed", [applied[0].event_id]))
+    else:
         stages.append(_missing("processed",
                                "processed acknowledgements carry no"
                                " application record"))
-    else:
-        stages.append(_failed("processed", [a.event_id for a in applied],
-                              f"applied {len(applied)} times, expected once"))
 
     # response: the quote response was accepted and reached the buyer.
     accepted_resp = find("message_accepted", kind=RESPONSE_KIND)
@@ -311,7 +323,8 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
     buyer_claims = (find("message_claimed", subject=response_id,
                          claimant=buyer) if response_id else [])
     mismatch = (None if version == LEGACY_EVALUATOR_VERSION
-                else _response_mismatch(accepted_resp, accepted_req))
+                else _response_mismatch(accepted_resp, accepted_req,
+                                        name_first=judges_every_request))
     if mismatch is not None and mismatch[0] == "failed":
         # Several requests are part of why several responses fail.
         cited = (accepted_req if len(accepted_req) > 1
@@ -337,9 +350,16 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
         buyer_acks = [a for r in accepted_resp
                       for a in find("ack_recorded", observer=buyer,
                                     subject=r.subject)]
-    verdict_acks = [a for a in buyer_acks
-                    if isinstance(a.detail.get("note"), dict)
-                    and "correct" in a.detail["note"]]
+    if strict_flags:
+        verdict_acks = [a for a in buyer_acks
+                        if isinstance(a.detail.get("note"), dict)
+                        and "correct" in a.detail["note"]]
+    else:
+        # Kept exactly as 0.2.0 and 0.3.0 had it, raise included: a
+        # historical bundle replays to what those rules did, and a note
+        # that is not an object raised there.
+        verdict_acks = [a for a in buyer_acks
+                        if "correct" in a.detail.get("note", {})]
     unreadable_verdicts = (_unreadable_flags(verdict_acks, "correct")
                            if strict_flags else [])
     if strict_flags:
@@ -404,7 +424,9 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                       if (_asserted(a.detail.get("note"), "duplicate") is True
                           if strict_flags
                           else a.detail.get("note", {}).get("duplicate"))]
-        if offered and recognized and len(applied) == 1:
+        # Recognising a duplicate means the one application was not
+        # repeated, which an unreadable application claim leaves open.
+        if offered and recognized and len(applied) == 1 and not unreadable:
             stages.append(_passed("duplicate_recognized",
                                   [offered[0].event_id,
                                    recognized[0].event_id]))
@@ -476,13 +498,19 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
     if judges_every_request and len(accepted_req) > 1:
         by_stage: dict[str, list[str]] = {
             "claimed": [], "received": [], "processed": [], "response": []}
-        # These stages are about the seller's handling, so only a request
-        # addressed to the seller is the seller's to answer. Every bundled
-        # profile has two roles, so today this filters nothing.
+        misaddressed: list[tuple[str, object]] = []
         for event in accepted_req:
-            if event.detail.get("to") not in (None, seller):
-                continue
             other = event.subject
+            answered = [r for r in accepted_resp if _names_request(r, other)]
+            recipient = event.detail.get("to")
+            if recipient not in (None, seller):
+                # Not the seller's to handle, so its handling stages say
+                # nothing about it. It is still a request this run accepted
+                # and nobody answered, and a verdict that passes over it is
+                # a verdict about part of the run.
+                if not answered:
+                    misaddressed.append((other, recipient))
+                continue
             acks = find("ack_recorded", observer=seller, subject=other)
             if not find("message_claimed", subject=other):
                 by_stage["claimed"].append(other)
@@ -493,7 +521,7 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                     if a.detail.get("status") == "processed"
                     and _asserted(a.detail.get("note"), "applied") is True]:
                 by_stage["processed"].append(other)
-            if not [r for r in accepted_resp if _names_request(r, other)]:
+            if not answered:
                 by_stage["response"].append(other)
         unfinished = {
             "claimed": "was never claimed",
@@ -501,14 +529,27 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
             "processed": "has no application record",
             "response": "was never answered",
         }
+        notes: dict[str, list[str]] = {}
+        for name, names in by_stage.items():
+            if names:
+                notes.setdefault(name, []).append(
+                    f"accepted request {_name_requests(names)}"
+                    f" {unfinished[name]}")
+        if misaddressed:
+            shown = "; ".join(
+                f"{_show_value(rid)} to {_show_value(to)}"
+                for rid, to in misaddressed[:3])
+            rest = len(misaddressed) - min(len(misaddressed), 3)
+            notes.setdefault("response", []).append(
+                f"accepted request {shown}"
+                + (f" and {rest} more" if rest else "")
+                + " was addressed to someone other than the seller and"
+                  " never answered")
         for index, existing in enumerate(stages):
-            names = by_stage.get(existing.name)
-            if not names or existing.status != "passed":
+            said = notes.get(existing.name)
+            if not said or existing.status != "passed":
                 continue
-            stages[index] = _missing(
-                existing.name,
-                f"accepted request {_name_requests(names)}"
-                f" {unfinished[existing.name]}")
+            stages[index] = _missing(existing.name, "; ".join(said))
 
     verified = find("portable_identity_verified")
     if verified:
