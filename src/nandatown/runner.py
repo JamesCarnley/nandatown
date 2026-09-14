@@ -27,7 +27,7 @@ import httpx
 
 from . import __version__
 from .bundle import write_bundle
-from .evaluator import EVALUATOR_VERSION, evaluate
+from .evaluator import EVALUATOR_VERSION, RESPONSE_KIND, evaluate
 from .records import RunRecord, TestProfile, TownEvent, fingerprint
 from .profiles import PROFILES
 
@@ -382,6 +382,38 @@ def _quiescent(profile: TestProfile, events: list[dict[str, Any]]) -> bool:
     return bool(applied)
 
 
+def _buyer_settled_response(events: list[dict[str, Any]]) -> bool:
+    """Has the buyer acknowledged a quote response it was sent?
+
+    Any status except ``retryable`` settles the buyer's claim, so by then
+    the buyer has recorded whatever it will assert about the response.
+    An externally joined buyer has no process for the runner to watch;
+    this is how the runner knows that buyer is finished.
+    """
+    responses = {e["subject"] for e in events
+                 if e["kind"] == "message_accepted"
+                 and e["detail"].get("kind") == RESPONSE_KIND}
+    return any(e["kind"] == "ack_recorded"
+               and e["observer"] == "buyer"
+               and e["subject"] in responses
+               and e["detail"].get("status") != "retryable"
+               for e in events)
+
+
+def _response_accepted(events: list[dict[str, Any]], buyer: str) -> bool:
+    """Has the town accepted a quote response addressed to the buyer?
+
+    From then on the response waits in the buyer's inbox: a seller that
+    exits has finished its part, and claiming and judging the response
+    is the buyer's. A response sent to anyone else never reaches that
+    inbox, so it leaves the buyer nothing to finish.
+    """
+    return any(e["kind"] == "message_accepted"
+               and e["detail"].get("kind") == RESPONSE_KIND
+               and e["detail"].get("to") == buyer
+               for e in events)
+
+
 def run_town(profile_name: str, out_dir: str, port: int = 0,
              model: str | None = None,
              external: dict[str, list[str] | None] | None = None,
@@ -517,15 +549,30 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
             procs.append(buyer)
 
         restarted = False
+        seller_done = False
+        # The participant the evaluator judges as the buyer.
+        buyer_name = next((n for n, r in profile.roles.items()
+                           if r == "buyer"), "buyer")
         refused_role: str | None = None
         deadline = time.time() + wait_timeout
         while time.time() < deadline:
             if buyer is not None and buyer.poll() is not None:
                 break
-            if buyer is None and _quiescent(profile, get_events()):
-                break
+            if buyer is None:
+                # Seller-side completion is not the end of an external
+                # buyer's turn: it still has to claim and judge the reply.
+                # A seller that has exited is finished whatever its
+                # acknowledgements say, and waiting for a note it can no
+                # longer send just spends the deadline: the protocol asks
+                # a seller to acknowledge, not to say "applied".
+                events = get_events()
+                if ((seller_done or _quiescent(profile, events))
+                        and _buyer_settled_response(events)):
+                    break
             if grants:
-                refused_role = _grant_refused(get_events())
+                # Reuse this iteration's fetch when the buyer check made one.
+                refused_role = _grant_refused(
+                    events if buyer is None else get_events())
                 if refused_role:
                     post_event("runner", "harness_refused_grant",
                                refused_role,
@@ -534,7 +581,7 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
                                           " this harness must present"
                                           " TOWN_GRANT"})
                     break
-            if seller is not None:
+            if seller is not None and not seller_done:
                 rc = seller.poll()
                 if rc is not None:
                     _stop_process(seller)
@@ -548,16 +595,27 @@ def run_town(profile_name: str, out_dir: str, port: int = 0,
                     else:
                         post_event("runner", "participant_exited",
                                    "seller", {"exit_code": rc})
-                        break
+                        if not _response_accepted(get_events(), buyer_name):
+                            break
+                        # The seller left after its quote response to the
+                        # buyer was accepted, so its part is over, but the
+                        # buyer still has to claim and judge that response.
+                        # It gets the rest of the same deadline to do so,
+                        # whether it is a process this runner watches or an
+                        # outside agent it only sees acknowledge.
+                        seller_done = True
             time.sleep(0.1)
         if buyer is not None:
             buyer_exit = _stop_process(buyer)
             post_event("runner", "participant_exited", "buyer",
                        {"exit_code": buyer_exit})
 
+        # This settling time is the seller's, so a seller that has already
+        # exited needs none of it: waiting on a note it can no longer send
+        # only delays the bundle.
         quiet_deadline = time.time() + (0.0 if refused_role else 8.0)
         while time.time() < quiet_deadline:
-            if _quiescent(profile, get_events()):
+            if seller_done or _quiescent(profile, get_events()):
                 break
             time.sleep(0.2)
 
