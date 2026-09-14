@@ -16,6 +16,7 @@ to the subject.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import sys
@@ -43,6 +44,7 @@ from .records import (
     RunRecord,
     StageResult,
     TownEvent,
+    canonical_json,
     fingerprint,
 )
 
@@ -86,6 +88,112 @@ def _strict_path_semantics(profile: PathProfile) -> bool:
 
 def _quote_intent_semantics(profile: PathProfile) -> bool:
     return profile.evaluator in QUOTE_INTENT_EVALUATORS
+
+
+# Subject values echoed into an event detail (card name and version, task
+# id, kind and state, fulfillment fields) sit at most three containers deep
+# in an events.jsonl line (event, detail, quote). pydantic-core refuses to
+# write a line nested past about 255 levels and to read one back past about
+# 200, so a deeper echo left a partial bundle. 64 is far beyond any
+# meaningful field and keeps every line well inside both limits.
+MAX_ECHOED_NESTING = 64
+
+
+def _nesting_exceeds(value: Any, limit: int) -> bool:
+    """Whether value nests containers deeper than limit, without recursing."""
+    containers = (dict, list)
+    stack = [(value, 1)] if isinstance(value, containers) else []
+    while stack:
+        item, depth = stack.pop()
+        if depth > limit:
+            return True
+        children = item.values() if isinstance(item, dict) else item
+        stack.extend((child, depth + 1) for child in children
+                     if isinstance(child, containers))
+    return False
+
+
+def _utf8_encodable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _unwritable(value: Any) -> str | None:
+    """Why a value within the nesting bound cannot be written verbatim.
+
+    Python's json decodes NaN, Infinity and -Infinity, which pydantic
+    writes as null, so replay would judge a different value than the run
+    did; and it cannot write a string or key holding a lone surrogate at
+    all. An unencodable string outranks a non-finite number, as it leaves
+    nothing to digest. Walks without recursing.
+    """
+    non_finite = False
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if isinstance(key, str) and not _utf8_encodable(key):
+                    return "unencodable string"
+                stack.append(child)
+        elif isinstance(item, list):
+            stack.extend(item)
+        elif isinstance(item, str):
+            if not _utf8_encodable(item):
+                return "unencodable string"
+        elif isinstance(item, float) and not math.isfinite(item):
+            non_finite = True
+    return "non-finite number" if non_finite else None
+
+
+def _json_type(value: Any) -> str:
+    # Markers are only made for containers, strings and floats.
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    return "string" if isinstance(value, str) else "number"
+
+
+def _echoed(value: Any) -> Any:
+    """A subject value as recorded in evidence: verbatim when writable.
+
+    A value nested deeper than the bound, or holding a lone surrogate or a
+    non-finite number, becomes a marker instead of crashing the bundle
+    write or being rewritten by it. Like the value, the marker is truthy
+    and never equals anything a stage expects (a task kind, a terminal
+    state, a quote term), so the recorded evidence evaluates as the value
+    would have. The card digest and the fulfillment's content_digest still
+    cover the full value.
+    """
+    if _nesting_exceeds(value, MAX_ECHOED_NESTING):
+        reason = "nesting too deep"
+    else:
+        reason = _unwritable(value)
+        if reason is None:
+            return value
+    marker = {"unrecorded": reason, "type": _json_type(value)}
+    if reason == "unencodable string":
+        # No UTF-8 encoding exists to measure or digest.
+        return marker
+    try:
+        # Canonical JSON spells non-finite numbers NaN, Infinity and
+        # -Infinity, as in the card digest and content_digest.
+        marker["json_length"] = len(canonical_json(value))
+        marker["fingerprint"] = fingerprint(value)
+    except (RecursionError, UnicodeEncodeError):
+        # Decoded just under the interpreter limit, re-serializing can need
+        # one frame more, and a lone surrogate nested past the bound has no
+        # UTF-8 encoding. The output is still the subject's, not a Town
+        # error: keep the marker without its digest. Frame use differs
+        # between Python versions, so for the same input the digest may be
+        # present on one and absent on another; replay reads the recorded
+        # marker either way.
+        marker.pop("json_length", None)
+    return marker
 
 
 def _quote_intent_errors(profile: PathProfile, detail: dict[str, Any]) -> list[str]:
@@ -248,8 +356,8 @@ def run_path_test(subject_url: str | None, out_dir: str,
                 observed_digest = fingerprint(card)
                 recorder.emit("town-requester", "card_retrieved", url,
                               {"digest": observed_digest,
-                               "name": card.get("name"),
-                               "version": card.get("version")})
+                               "name": _echoed(card.get("name")),
+                               "version": _echoed(card.get("version"))})
                 card_ok = True
                 if pinned:
                     recorder.emit("town-requester", "descriptor_expected",
@@ -283,9 +391,9 @@ def run_path_test(subject_url: str | None, out_dir: str,
                     exchange_detail = {
                         "attempt": attempt,
                         "ok": True,
-                        "task_id": task.get("id"),
-                        "kind": task.get("kind"),
-                        "state": state,
+                        "task_id": _echoed(task.get("id")),
+                        "kind": _echoed(task.get("kind")),
+                        "state": _echoed(state),
                     }
                     terminal_outputs = None
                     if strict_semantics:
@@ -316,36 +424,48 @@ def run_path_test(subject_url: str | None, out_dir: str,
                         text = artifact_text(task)
                     try:
                         fulfillment = json.loads(text)
-                        if not isinstance(fulfillment, dict):
-                            recorder.emit("town-requester", "fulfillment_unparseable",
-                                          order_id, {"attempt": attempt,
-                                                     "reason": "quote is not a JSON object"})
-                            if strict_semantics:
-                                break
-                            continue
-                        detail = {
-                            "attempt": attempt,
-                            "total_cents": fulfillment.get("total_cents"),
-                            "request_id": fulfillment.get("request_id"),
-                            "content_digest": fingerprint(fulfillment)}
-                        if _quote_intent_semantics(profile):
-                            detail["quote"] = {
-                                field: fulfillment[field] for field in QUOTE_INTENT_FIELDS
-                                if field in fulfillment}
-                        recorder.emit(
-                            "town-requester", "fulfillment_observed",
-                            order_id, detail)
-                    except (json.JSONDecodeError, TypeError) as exc:
-                        if isinstance(exc, TypeError) and not strict_semantics:
+                        content_digest = (fingerprint(fulfillment)
+                                          if isinstance(fulfillment, dict)
+                                          else None)
+                    except (ValueError, TypeError, RecursionError) as exc:
+                        # Output that cannot be decoded or digested (past
+                        # the recursion limit, oversized integers, lone
+                        # surrogates) is the subject's, never a Town error.
+                        # Only decoding is guarded, so a Town recording
+                        # fault is not blamed on the subject. Legacy
+                        # profiles keep their recorded behavior.
+                        if not strict_semantics and not isinstance(
+                                exc, json.JSONDecodeError):
                             raise
                         preview = (text[:200] if isinstance(text, str)
                                    else repr(text)[:200])
                         recorder.emit("town-requester",
                                       "fulfillment_unparseable", order_id,
                                       {"attempt": attempt,
-                                       "text": preview})
+                                       "text": _echoed(preview)})
                         if strict_semantics:
                             break
+                        continue
+                    if not isinstance(fulfillment, dict):
+                        recorder.emit("town-requester", "fulfillment_unparseable",
+                                      order_id, {"attempt": attempt,
+                                                 "reason": "quote is not a JSON object"})
+                        if strict_semantics:
+                            break
+                        continue
+                    detail = {
+                        "attempt": attempt,
+                        "total_cents": _echoed(fulfillment.get("total_cents")),
+                        "request_id": _echoed(fulfillment.get("request_id")),
+                        "content_digest": content_digest}
+                    if _quote_intent_semantics(profile):
+                        detail["quote"] = {
+                            field: _echoed(fulfillment[field])
+                            for field in QUOTE_INTENT_FIELDS
+                            if field in fulfillment}
+                    recorder.emit(
+                        "town-requester", "fulfillment_observed",
+                        order_id, detail)
                 except (ValueError, httpx.HTTPError) as exc:
                     recorder.emit("town-requester", "protocol_exchange",
                                   order_id,
