@@ -544,8 +544,10 @@ def test_identity_handoff_gives_an_external_agent_its_grant(tmp_path):
                 p.terminate()
 
     assert set(handed["seller"]) == {"TOWN_URL", "RUN_ID", "NAME", "TOKEN",
-                                     "STATE_DIR", "TOWN_GRANT"}, \
-        "the spawned participants' environment contract, plus the grant"
+                                     "STATE_DIR", "DEADLINE",
+                                     "TOWN_GRANT"}, \
+        ("the spawned participants' environment contract less FAULT, which"
+         " a subject is not told, plus the grant")
     detail = [(s.name, s.status, s.note) for s in result.stages]
     assert result.verdict == "passed", (detail, stderr_path.read_text())
     assert next(s for s in result.stages

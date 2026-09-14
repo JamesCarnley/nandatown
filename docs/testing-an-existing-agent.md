@@ -38,7 +38,9 @@ Python participant. Calibrate that path with:
 nandatown test-agent --role seller --cmd "python examples/byoa_seller.py"
 ```
 
-It receives `TOWN_URL`, `RUN_ID`, `NAME`, `TOKEN` and `STATE_DIR`; these are
+It receives `TOWN_URL`, `RUN_ID`, `NAME`, `TOKEN`, `STATE_DIR` and
+`DEADLINE`, the seconds this run will wait, plus `FAULT` for a profile that
+scripts one, which only Town's own scripted participants act on; these are
 temporary test credentials and state. Commands run with your OS privileges.
 Review custom commands and plugins before executing them. This example is a
 Town fixture, so its success is not an independent-agent result.
@@ -79,7 +81,10 @@ A2A port. `--wait` has a different network shape: the remote participant must
 reach Town's coordinator, which the automatic runner binds to loopback. Use a
 tunnel or the [shared coordinator guide](operators.md). For a participant on a
 different machine, replace the printed `STATE_DIR` with its own writable local
-directory; Town's filesystem path does not exist on the remote machine.
+directory; Town's filesystem path does not exist on the remote machine. The
+printed credentials include `DEADLINE`, the seconds this run will wait, and
+never `FAULT`: an agent joining from outside is the subject, and Town does
+not tell a subject to misbehave.
 
 ## 4. Read what passed and what did not run
 

@@ -547,9 +547,10 @@ environment; `--wait` prints those credentials and waits while you
 start it wherever the coordinator is reachable. `examples/byoa_seller.py` is a complete
 reference agent in plain standard-library Python: no nandatown import,
 no dependency, just the HTTP contract. For `nandatown run ... --identity`, a pinned role is
-handed `TOWN_GRANT` instead of `TOKEN` and must join with an Ed25519
-session proof (`TownClient.join_with_grant`); the runner stops early,
-with a `harness_refused_grant` event, if an agent tries the bare token
+handed `TOWN_GRANT` in addition to `TOKEN`, which the town refuses for
+pinned roles: the agent must join with an Ed25519 session proof
+(`TownClient.join_with_grant`), and the runner stops early, with a
+`harness_refused_grant` event, if an agent tries the bare token
 instead. The standard-library example is for token runs.
 
 ## Onboard a service
