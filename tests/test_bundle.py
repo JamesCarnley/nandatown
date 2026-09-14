@@ -454,7 +454,8 @@ def test_historical_evaluator_mismatch_remains_explicit(tmp_path):
     problems = verify_bundle(path)
 
     assert problems == [
-        "evaluator version differs: bundle historical-evaluator, local 0.3.0;"
+        "evaluator version differs: bundle historical-evaluator, local"
+        f" {EVALUATOR_VERSION};"
         " reproducibility not checked"
     ]
 

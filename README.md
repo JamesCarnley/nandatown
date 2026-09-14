@@ -190,10 +190,22 @@ Path evaluators are versioned. Replay a `path-0.1` bundle with its matching
 than treating the bundle as corrupt. The bundle's existing signature remains
 valid for its recorded bytes.
 
-The Track evaluator is `0.3.0`. Its `response` stage requires exactly one
-distinct accepted `quote_response`, whose body `request_id` names the accepted
-request; the town records that `request_id` on the `message_accepted` event,
-verbatim when it is a string of at most 128 characters and otherwise as
+The Track evaluator is `0.4.0`. It reads an acknowledgement flag only when it
+is a JSON boolean: `applied`, `correct` and `duplicate` given as a string, a
+number or anything else state nothing about the work, so the stage they belong
+to is inconclusive rather than passed. The fault stages read `tool_errors` and
+`context_truncations` the same way, as integers. It also judges every accepted
+`quote_request`, not only the first: one that was never claimed, acknowledged,
+applied or answered leaves the stage it did not reach inconclusive and the run
+incomplete, naming that request. A request addressed to someone other than
+the seller leaves the seller's own stages alone and is reported under
+`response` instead. One readable `applied: true` beside an unreadable claim
+does not establish application exactly once. Town's own buyer sends exactly one request,
+so this changes nothing for the bundled profiles; it matters when the subject
+is the buyer. Its `response` stage requires exactly one distinct accepted
+`quote_response`, whose body `request_id` names the accepted request; the
+town records that `request_id` on the `message_accepted` event, verbatim
+when it is a string of at most 128 characters and otherwise as
 `request_id_digest` (its JSON type, JSON text length and fingerprint), which is
 still compared exactly with the accepted request's message id. A second
 response under another identity, or a response naming another request, fails
