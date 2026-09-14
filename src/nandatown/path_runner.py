@@ -278,35 +278,124 @@ class _Recorder:
             "action": action, "payload": payload})
 
 
+def _is_endpoint_url(value: object) -> bool:
+    """Whether httpx parses value as an absolute http(s) URL with a host.
+
+    Any host and any TCP port (1-65535, or none for the scheme default) is
+    accepted: loopback, LAN and remote agents are all valid subjects. httpx
+    parses a port outside that range, which then fails only on connect.
+    Raw whitespace is refused because httpx would drop it or percent-encode
+    it into a different endpoint.
+
+    Parsing a URL is not the same as being able to read its parts. httpx
+    decodes a punycode hostname only when the host is asked for, and a
+    malformed A-label such as ``xn--`` raises there instead. So the parts
+    are read inside the guard, and a hostname that will not decode makes
+    the URL unusable rather than a crash. httpx decodes only a hostname
+    that begins with ``xn--``, so ``localhost.xn--a`` is still accepted
+    here and fails later, as a subject that cannot be reached.
+    """
+    if not isinstance(value, str) or any(ch.isspace() for ch in value):
+        return False
+    try:
+        parsed = httpx.URL(value)
+        return (parsed.scheme in ("http", "https") and bool(parsed.host)
+                and (parsed.port is None or 1 <= parsed.port <= 65535))
+    except (httpx.InvalidURL, UnicodeError):
+        return False
+
+
+def _subject_label(subject_url: str | None,
+                   agent_name: str | None) -> str | None:
+    """The locator that names the subject in the run record and events.
+
+    This is ``subject_url or agent_name`` with a whitespace-only locator
+    counted as empty and a non-string one as absent: verify rejects a blank
+    or non-string participant name, receipts a blank subject, and events
+    need a string subject. Resolution refuses a blank or non-string URL and
+    agent name, even one an index lists, so a run that records its subject
+    as "?" never gets past resolution.
+    """
+    def usable(locator: object) -> str | None:
+        if not isinstance(locator, str):
+            return None
+        if not locator.strip():
+            return ""
+        return locator
+
+    return usable(subject_url) or usable(agent_name)
+
+
 def _resolve(recorder: _Recorder, url: str | None, index_file: str | None,
              agent_name: str | None) -> tuple[str | None, str | None]:
-    """Returns (subject_url, pinned_card_digest_from_index)."""
+    """Returns (subject_url, pinned_card_digest_from_index).
+
+    A locator Town cannot use fails resolution here, so it is never charged
+    to the agent's card retrieval.
+    """
     if index_file:
         recorder.intend("town-requester", "resolve",
                         {"index": index_file, "agent": agent_name})
+        subject = _subject_label(None, agent_name) or "?"
+
+        def fail(reason: str) -> tuple[None, None]:
+            recorder.emit("town-requester", "resolution_failed", subject,
+                          {"reason": reason})
+            return None, None
+
+        if not isinstance(agent_name, str) or not agent_name.strip():
+            # An index may list a blank name, which would let a passing
+            # run and its receipt leave the subject unnamed.
+            return fail("blank agent name: expected a non-blank name to"
+                        " look up in the pinned index")
         try:
-            with open(index_file) as f:
+            # JSON is UTF-8 whatever the locale, so a non-ASCII agent name
+            # resolves the same on every machine.
+            with open(index_file, encoding="utf-8") as f:
                 index = json.load(f)
-        except (OSError, json.JSONDecodeError) as exc:
-            recorder.emit("town-requester", "resolution_failed",
-                          agent_name or "?",
-                          {"reason": f"index unreadable: {exc}"})
-            return None, None
-        entry = (index.get("agents") or {}).get(agent_name or "")
+        except (OSError, ValueError, RecursionError) as exc:
+            # Includes invalid JSON, bytes that are not UTF-8 and nesting
+            # past the recursion limit.
+            return fail(f"index unreadable: {exc}")
+        # The index is operator-supplied fixture JSON: check its shape
+        # before trusting it, and name the problem without echoing values.
+        if not isinstance(index, dict):
+            return fail("malformed index: top level must be a JSON object")
+        agents = index.get("agents")
+        if agents is not None and not isinstance(agents, dict):
+            return fail('malformed index: "agents" must be a JSON object')
+        entry = (agents or {}).get(agent_name or "")
+        if entry is not None and not isinstance(entry, dict):
+            return fail("malformed index: the entry for this agent must be"
+                        " a JSON object")
         if not entry or "url" not in entry:
-            recorder.emit("town-requester", "resolution_failed",
-                          agent_name or "?",
-                          {"reason": "missing card pointer: the pinned"
-                                     " index has no entry for this"
-                                     " agent"})
-            return None, None
-        recorder.emit("town-requester", "resolution_hop",
-                      agent_name or "?",
+            return fail("missing card pointer: the pinned index has no"
+                        " entry for this agent")
+        if not isinstance(entry["url"], str) or not entry["url"]:
+            return fail('malformed index: the entry "url" must be a'
+                        " non-empty string")
+        if not _is_endpoint_url(entry["url"]):
+            return fail('malformed index: the entry "url" must be an'
+                        " absolute http(s) URL")
+        digest = entry.get("card_digest")
+        if digest is not None and (not isinstance(digest, str)
+                                   or not digest):
+            # An empty pin would silently leave descriptor consistency
+            # untested instead of checking it.
+            return fail('malformed index: the entry "card_digest" must be'
+                        " a non-empty string")
+        recorder.emit("town-requester", "resolution_hop", subject,
                       {"kind": "pinned-index", "index": index_file,
                        "url": entry["url"]})
         return entry["url"], entry.get("card_digest")
     recorder.intend("town-requester", "resolve", {"url": url})
-    recorder.emit("town-requester", "resolution_hop", url or "?",
+    subject = _subject_label(url, None) or "?"
+    if not _is_endpoint_url(url):
+        recorder.emit("town-requester", "resolution_failed", subject,
+                      {"reason": "invalid endpoint URL: expected an"
+                                 " absolute http(s) URL"})
+        return None, None
+    recorder.emit("town-requester", "resolution_hop", subject,
                   {"kind": "direct", "url": url})
     return url, None
 
@@ -501,13 +590,14 @@ def run_path_test(subject_url: str | None, out_dir: str,
         created_at=time.time(),
         participants=[
             {"name": "town-requester", "role": "requester"},
-            {"name": subject_url or agent_name or "?",
+            {"name": _subject_label(subject_url, agent_name) or "?",
              "role": "subject"},
         ],
         releases={"nandatown": __version__,
                   "evaluator": path_evaluator_version(profile),
                   "python": sys.version.split()[0]},
-        config={"mode": "path", "subject": subject_url or agent_name,
+        config={"mode": "path",
+                "subject": _subject_label(subject_url, agent_name),
                 "profile": profile.ref,
                 "pinned_card_digest": pinned,
                 "nonce": nonce,

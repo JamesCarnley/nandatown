@@ -224,7 +224,7 @@ def probe_endpoint(base_url: str,
     report: dict[str, Any] = {"ok": False, "problems": []}
     try:
         card = fetch_card(base_url, http=http)
-    except (ValueError, httpx.HTTPError) as exc:
+    except (ValueError, httpx.InvalidURL, httpx.HTTPError) as exc:
         report["problems"].append(str(exc))
         return report
     report["card"] = {k: card.get(k) for k in ("name", "version", "url")}
@@ -249,7 +249,7 @@ def probe_endpoint(base_url: str,
                                         "working", "failed"):
             report["problems"].append(
                 f"unknown task state {report['task_state']!r}")
-    except (ValueError, httpx.HTTPError) as exc:
+    except (ValueError, httpx.InvalidURL, httpx.HTTPError) as exc:
         report["problems"].append(f"message/send round trip failed:"
                                   f" {exc}")
     report["ok"] = not report["problems"]

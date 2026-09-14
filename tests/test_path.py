@@ -239,6 +239,490 @@ def test_index_resolution_and_missing_pointer(tmp_path):
     assert missing.verdict == "failed"
 
 
+@pytest.mark.parametrize("index_json, reason", [
+    ([{"agents": {"maya-seller": {"url": SUBJECT}}}],
+     "top level must be a JSON object"),
+    (None, "top level must be a JSON object"),
+    ({"agents": [{"name": "maya-seller", "url": SUBJECT}]},
+     '"agents" must be a JSON object'),
+    ({"agents": {"maya-seller": f"url {SUBJECT}"}},
+     "the entry for this agent must be a JSON object"),
+    ({"agents": {"maya-seller": {"url": 5}}},
+     'the entry "url" must be a non-empty string'),
+    ({"agents": {"maya-seller": {"url": ""}}},
+     'the entry "url" must be a non-empty string'),
+    ({"agents": {"maya-seller": {"url": SUBJECT, "card_digest": 5}}},
+     'the entry "card_digest" must be a non-empty string'),
+    ({"agents": {"maya-seller": {"url": SUBJECT, "card_digest": ""}}},
+     'the entry "card_digest" must be a non-empty string'),
+], ids=["top-level-list", "top-level-null", "agents-list", "entry-string",
+        "url-number", "url-empty", "card-digest-number", "card-digest-empty"])
+def test_malformed_index_fails_resolution_with_verifiable_bundle(
+        tmp_path, index_json, reason):
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps(index_json))
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name="maya-seller", http=client())
+
+    resolution = stage(result, "resolution")
+    assert resolution.status == "failed"
+    assert resolution.note == f"malformed index: {reason}"
+    assert stage(result, "agent_card_retrieval").status == "not_tested"
+    assert result.verdict == "failed"
+    assert verify_bundle(bundle_dir) == []
+
+
+@pytest.mark.parametrize("raw", [
+    pytest.param('{"agents": {"maya-seller": {"url": "café"}}}'
+                 .encode("latin-1"), id="not-utf8"),
+    pytest.param(b"[" * 200_000 + b"]" * 200_000, id="nesting-too-deep"),
+])
+def test_unreadable_index_fails_resolution_with_verifiable_bundle(
+        tmp_path, raw):
+    index = tmp_path / "index.json"
+    index.write_bytes(raw)
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name="maya-seller", http=client())
+
+    resolution = stage(result, "resolution")
+    assert resolution.status == "failed"
+    assert resolution.note.startswith("index unreadable: ")
+    assert result.verdict == "failed"
+    assert verify_bundle(bundle_dir) == []
+
+
+def test_cli_malformed_index_writes_failed_resolution_bundle(tmp_path,
+                                                             capsys):
+    from nandatown.cli import main
+
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps(
+        {"agents": [{"name": "maya-seller", "url": SUBJECT}]}))
+
+    code = main(["test-agent", "--index", str(index), "--agent-name",
+                 "maya-seller", "--out", str(tmp_path / "runs")])
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert 'malformed index: "agents" must be a JSON object' in out
+    assert "0 of 6 path stages passed" in out
+    bundle_dir = out.split("Evidence bundle: ", 1)[1].strip()
+    resolution = next(s for s in load_bundle(bundle_dir)["result"].stages
+                      if s.name == "resolution")
+    assert resolution.status == "failed"
+    assert verify_bundle(bundle_dir) == []
+
+
+INVALID_URL_REASON = "invalid endpoint URL: expected an absolute http(s) URL"
+INVALID_INDEX_URL_REASON = ('malformed index: the entry "url" must be an'
+                            " absolute http(s) URL")
+UNUSABLE_URLS = [
+    pytest.param("   ", id="blank"),
+    pytest.param(" http://127.0.0.1:9", id="leading-space"),
+    pytest.param("https://agent.example ", id="trailing-space"),
+    pytest.param("http://127.0.0.1:9\n", id="trailing-newline"),
+    pytest.param("http://not a url", id="space-in-host"),
+    pytest.param("not a url", id="not-a-url"),
+    pytest.param("file:///etc/hosts", id="file-scheme"),
+    pytest.param("ftp://agent.example", id="ftp-scheme"),
+    pytest.param("//agent.example", id="no-scheme"),
+    pytest.param("http://", id="no-host"),
+    pytest.param("http://[::1", id="unparseable"),
+    pytest.param("http://" + "a" * 1_000_000, id="one-megabyte"),
+    pytest.param("\t\n", id="whitespace-only"),
+    pytest.param("http://127.0.0.1:99999", id="port-99999"),
+    pytest.param("http://127.0.0.1:65536", id="port-65536"),
+    pytest.param("http://127.0.0.1:0", id="port-zero"),
+    pytest.param("http://127.0.0.1:-1", id="port-negative"),
+    pytest.param("http://[::1]:99999", id="ipv6-port-99999"),
+    pytest.param("https://agent.example:" + "9" * 30, id="port-30-digits"),
+    pytest.param("http://xn--.localhost:9", id="empty-a-label"),
+    pytest.param("http://xn--a.localhost:9", id="undecodable-a-label"),
+]
+USABLE_URLS = ["http://10.0.0.5:8940", "https://agent.example",
+               "http://127.0.0.1:9", "http://[::1]:8940",
+               "https://agent.example:8443/a2a/", "http://127.0.0.1:1",
+               "http://127.0.0.1:65535", "http://[::1]:65535",
+               "http://127.0.0.1:", "http://xn--caf-dma.localhost:8940"]
+MALFORMED_A_LABEL_URLS = ["http://xn--.localhost:9",
+                          "http://xn--a.localhost:9"]
+
+
+def _assert_resolution_refused(bundle_dir, result, reason, problems=()):
+    resolution = stage(result, "resolution")
+    assert resolution.status == "failed"
+    assert resolution.note == reason
+    assert stage(result, "agent_card_retrieval").status == "not_tested"
+    assert result.verdict == "failed"
+    kinds = [event.kind for event in load_bundle(bundle_dir)["events"]]
+    assert "card_fetch_failed" not in kinds
+    assert "card_retrieved" not in kinds
+    assert verify_bundle(bundle_dir) == list(problems)
+
+
+@pytest.mark.parametrize("url", UNUSABLE_URLS)
+def test_unusable_url_fails_resolution_not_card_retrieval(tmp_path, url):
+    """An unusable locator is the operator's, not the agent's, failure."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"),
+                                       http=client())
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+
+
+@pytest.mark.parametrize("url", UNUSABLE_URLS)
+def test_unusable_index_url_fails_resolution_not_card_retrieval(tmp_path,
+                                                               url):
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": url}}}))
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name="maya-seller", http=client())
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_INDEX_URL_REASON)
+
+
+@pytest.mark.parametrize("url", [
+    pytest.param("http://127.0.0.1:9\n", id="trailing-newline"),
+    pytest.param("http://" + "a" * 1_000_000, id="one-megabyte"),
+])
+def test_url_httpx_rejects_fails_resolution_without_traceback(tmp_path,
+                                                             url):
+    """Without an injected client these reached httpx and raised."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"))
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+
+
+@pytest.mark.parametrize("url", MALFORMED_A_LABEL_URLS)
+def test_malformed_a_label_without_a_client_fails_resolution(tmp_path, url):
+    """httpx accepts these; reading the host is what raises.
+
+    The other malformed-label test injects a client, so this is the one
+    that proves the real httpx path does not traceback.
+    """
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"))
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+
+
+@pytest.mark.parametrize("via", ["url", "index"])
+@pytest.mark.parametrize("url", MALFORMED_A_LABEL_URLS)
+def test_malformed_a_label_is_refused_before_any_request(tmp_path, url, via):
+    """Reading the host of these decodes punycode, which raises.
+
+    httpx parses them, so the refusal has to come from evaluating the host
+    itself, not from parsing. The subject is never contacted.
+    """
+    requests = []
+
+    def record(request):
+        requests.append(request.url)
+        return httpx.Response(200, json=build_agent_card(SUBJECT))
+
+    http = httpx.Client(transport=httpx.MockTransport(record))
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": url}}}))
+
+    if via == "url":
+        bundle_dir, result = run_path_test(url, str(tmp_path / "runs"),
+                                           http=http)
+        reason = INVALID_URL_REASON
+    else:
+        bundle_dir, result = run_path_test(
+            None, str(tmp_path / "runs"), index_file=str(index),
+            agent_name="maya-seller", http=http)
+        reason = INVALID_INDEX_URL_REASON
+
+    _assert_resolution_refused(bundle_dir, result, reason)
+    assert requests == []
+
+
+@pytest.mark.parametrize("via", ["url", "index"])
+@pytest.mark.parametrize("url", USABLE_URLS)
+def test_any_absolute_http_url_passes_resolution(tmp_path, url, via):
+    """Loopback, LAN and remote endpoints are all valid subjects."""
+    kwargs = {}
+    subject = url
+    if via == "index":
+        index = tmp_path / "index.json"
+        index.write_text(json.dumps({"agents": {"maya-seller": {"url": url}}}))
+        kwargs = {"index_file": str(index), "agent_name": "maya-seller"}
+        subject = None
+
+    _, result = run_path_test(subject, str(tmp_path / "runs"),
+                              http=client(), **kwargs)
+
+    assert stage(result, "resolution").status == "passed"
+    assert stage(result, "agent_card_retrieval").status == "passed"
+
+
+@pytest.mark.parametrize("url", [
+    pytest.param("http://127.0.0.1:99999", id="port-99999"),
+    pytest.param("http://127.0.0.1:0", id="port-zero"),
+])
+def test_out_of_range_port_is_not_charged_to_card_retrieval(tmp_path, url):
+    """Without an injected client these failed as the agent's card fetch."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"))
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+
+
+def _assert_verifiable_with_receipt(bundle_dir, tmp_path):
+    from nandatown.identity_portable import Keystore
+    from nandatown.receipt import make_receipt
+
+    assert verify_bundle(bundle_dir) == []
+    receipt = json.loads(open(make_receipt(
+        bundle_dir, keystore=Keystore(str(tmp_path / "keys")))).read())
+    assert receipt["payload"]["claim"]["subject"].strip()
+
+
+def _resolution_subjects(bundle_dir):
+    return [event.subject for event in load_bundle(bundle_dir)["events"]
+            if event.kind in ("resolution_failed", "resolution_hop")]
+
+
+@pytest.mark.parametrize("url", ["", "   ", "\t\n"])
+def test_blank_url_writes_a_bundle_that_verifies(tmp_path, url):
+    """A blank locator must not become the recorded subject name."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"),
+                                       http=client())
+
+    assert stage(result, "resolution").status == "failed"
+    run = load_bundle(bundle_dir)["run"]
+    assert run.participants[1] == {"name": "?", "role": "subject"}
+    assert run.config["subject"] in (None, "")
+    assert _resolution_subjects(bundle_dir) == ["?"]
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+@pytest.mark.parametrize("url", [
+    pytest.param(5, id="number"),
+    pytest.param([SUBJECT], id="list"),
+])
+def test_non_string_url_fails_resolution_without_crashing(tmp_path, url):
+    """An API caller's non-string URL once crashed recording the event."""
+    bundle_dir, result = run_path_test(url, str(tmp_path / "runs"),
+                                       http=client())
+
+    _assert_resolution_refused(bundle_dir, result, INVALID_URL_REASON)
+    assert load_bundle(bundle_dir)["run"].participants[1]["name"] == "?"
+    assert _resolution_subjects(bundle_dir) == ["?"]
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+BLANK_AGENT_NAME_REASON = ("blank agent name: expected a non-blank name to"
+                           " look up in the pinned index")
+# Whitespace-only: truthy, so no caller-side "is a name given" check can
+# stop one before resolution does.
+WHITESPACE_AGENT_NAMES = [
+    pytest.param("   ", id="spaces"),
+    pytest.param("\t", id="tab"),
+    pytest.param("\n", id="newline"),
+    pytest.param(" \t\r\n", id="mixed"),
+    pytest.param("\u00a0\u3000", id="unicode-spaces"),
+]
+
+
+@pytest.mark.parametrize("listed", [True, False], ids=["listed", "unlisted"])
+@pytest.mark.parametrize("agent_name", WHITESPACE_AGENT_NAMES)
+def test_blank_agent_name_fails_resolution_before_the_index_lookup(
+        tmp_path, agent_name, listed):
+    """An index may list a blank name, but a run must name its subject.
+
+    Resolving one let a passing receipt name its subject "?".
+    """
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {
+        (agent_name if listed else "maya-seller"): {"url": SUBJECT}}}))
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name=agent_name, http=client())
+
+    _assert_resolution_refused(bundle_dir, result, BLANK_AGENT_NAME_REASON)
+    run = load_bundle(bundle_dir)["run"]
+    assert run.participants[1] == {"name": "?", "role": "subject"}
+    assert run.config["subject"] in (None, "")
+    assert _resolution_subjects(bundle_dir) == ["?"]
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+@pytest.mark.parametrize("listed", [True, False], ids=["listed", "unlisted"])
+@pytest.mark.parametrize("agent_name", ["", None], ids=["empty", "none"])
+def test_empty_agent_name_never_resolves_an_index_entry(tmp_path,
+                                                        agent_name, listed):
+    """An index listing "" must not let a nameless run resolve.
+
+    The run is either refused before it starts or fails resolution with a
+    bundle that verifies; both keep the subject from going unnamed.
+    """
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {
+        ("" if listed else "maya-seller"): {"url": SUBJECT}}}))
+    runs = tmp_path / "runs"
+
+    try:
+        bundle_dir, result = run_path_test(
+            None, str(runs), index_file=str(index), agent_name=agent_name,
+            http=client())
+    except ValueError:
+        assert not runs.exists() or not any(runs.iterdir())
+        return
+
+    _assert_resolution_refused(bundle_dir, result, BLANK_AGENT_NAME_REASON)
+    assert _resolution_subjects(bundle_dir) == ["?"]
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+@pytest.mark.parametrize("agent_name", [
+    pytest.param(["maya-seller"], id="list"),
+    pytest.param({"name": "maya-seller"}, id="object"),
+    pytest.param(5, id="number"),
+])
+def test_non_string_agent_name_fails_resolution_without_crashing(
+        tmp_path, agent_name):
+    """An API caller's non-string name once crashed recording the event."""
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": SUBJECT}}}))
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name=agent_name, http=client())
+
+    _assert_resolution_refused(bundle_dir, result, BLANK_AGENT_NAME_REASON)
+    run = load_bundle(bundle_dir)["run"]
+    assert run.participants[1] == {"name": "?", "role": "subject"}
+    assert run.config["subject"] is None
+    assert _resolution_subjects(bundle_dir) == ["?"]
+    _assert_verifiable_with_receipt(bundle_dir, tmp_path)
+
+
+@pytest.mark.parametrize("agent_name, resolves", [
+    ("maya-seller", True),
+    (" maya-seller ", True),
+    ("Zoë", True),
+    ("nobody", False),
+])
+def test_non_blank_agent_name_is_the_resolution_subject_verbatim(
+        tmp_path, agent_name, resolves):
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {
+        "maya-seller": {"url": SUBJECT}, " maya-seller ": {"url": SUBJECT},
+        "Zoë": {"url": SUBJECT}}}, ensure_ascii=False),
+        encoding="utf-8")
+
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"), index_file=str(index),
+        agent_name=agent_name, http=client())
+
+    assert stage(result, "resolution").status == (
+        "passed" if resolves else "failed")
+    assert _resolution_subjects(bundle_dir) == [agent_name]
+    assert load_bundle(bundle_dir)["run"].participants[1]["name"] \
+        == agent_name
+    assert verify_bundle(bundle_dir) == []
+
+
+def test_utf8_index_resolves_a_non_ascii_name_whatever_the_locale(tmp_path):
+    """Reading the index with the locale's encoding failed it as unreadable."""
+    index = tmp_path / "index.json"
+    index.write_bytes(json.dumps({"agents": {"Zoë": {"url": SUBJECT}}},
+                                 ensure_ascii=False).encode("utf-8"))
+    assert "Zoë".encode("utf-8") in index.read_bytes()
+    child = (
+        "import json, locale, sys\n"
+        "from nandatown.path_runner import _Recorder, _resolve\n"
+        "encoding = locale.getpreferredencoding(False)\n"
+        "assert not sys.flags.utf8_mode\n"
+        "assert encoding.replace('-', '').lower() != 'utf8', encoding\n"
+        "recorder = _Recorder('path-locale')\n"
+        "url, _ = _resolve(recorder, None, sys.argv[1], 'Zo\\u00eb')\n"
+        "print(json.dumps({'url': url, 'events': [\n"
+        "    [e.kind, e.subject, e.detail.get('reason')]\n"
+        "    for e in recorder.events]}))\n")
+    source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+                       PYTHONPATH=os.path.join(source_root, "src"),
+                       PYTHONUTF8="0", PYTHONCOERCECLOCALE="0",
+                       LC_ALL="C", LANG="C")
+
+    completed = subprocess.run(
+        [sys.executable, "-c", child, str(index)], env=environment,
+        capture_output=True, text=True, timeout=60)
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "url": SUBJECT,
+        "events": [["resolution_hop", "Zoë", None]]}
+
+
+def test_blank_agent_name_is_refused_before_reading_the_index(tmp_path):
+    bundle_dir, result = run_path_test(
+        None, str(tmp_path / "runs"),
+        index_file=str(tmp_path / "missing.json"), agent_name="   ",
+        http=client())
+
+    _assert_resolution_refused(bundle_dir, result, BLANK_AGENT_NAME_REASON)
+
+
+def test_subject_names_are_recorded_unchanged(tmp_path):
+    """Pins run records Town already wrote with a usable locator."""
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": SUBJECT}}}))
+    runs = str(tmp_path / "runs")
+    cases = [
+        ((SUBJECT, None, None), SUBJECT, SUBJECT),
+        ((None, str(index), "maya-seller"), "maya-seller", "maya-seller"),
+        ((None, None, None), "?", None),
+    ]
+    for (url, index_file, agent_name), name, subject in cases:
+        bundle_dir, _ = run_path_test(url, runs, index_file=index_file,
+                                      agent_name=agent_name, http=client())
+        run = load_bundle(bundle_dir)["run"]
+        assert run.participants[1] == {"name": name, "role": "subject"}
+        assert run.config["subject"] == subject
+        assert verify_bundle(bundle_dir) == []
+
+
+@pytest.mark.parametrize("argv", [
+    pytest.param(["--url", "   "], id="blank-url"),
+    pytest.param(["--index", "INDEX", "--agent-name", "   "],
+                 id="blank-agent-name"),
+    pytest.param(["--index", "BLANK_INDEX", "--agent-name", "   "],
+                 id="blank-agent-name-listed"),
+])
+def test_cli_blank_locator_bundle_passes_nandatown_verify(tmp_path, capsys,
+                                                          argv):
+    from nandatown.cli import main
+
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps({"agents": {"maya-seller": {"url": SUBJECT}}}))
+    # Listed under a blank name at a closed loopback port: resolving it
+    # would reach card retrieval instead of failing resolution.
+    blank_index = tmp_path / "blank-index.json"
+    blank_index.write_text(json.dumps(
+        {"agents": {"   ": {"url": "http://127.0.0.1:9"}}}))
+    paths = {"INDEX": str(index), "BLANK_INDEX": str(blank_index)}
+    argv = [paths.get(arg, arg) for arg in argv]
+
+    code = main(["test-agent", *argv, "--out", str(tmp_path / "runs")])
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "Traceback" not in out
+    if "--agent-name" in argv:
+        assert BLANK_AGENT_NAME_REASON in out
+    bundle_dir = out.split("Evidence bundle: ", 1)[1].strip()
+    assert main(["verify", bundle_dir]) == 0
+    assert "bundle verified" in capsys.readouterr().out
+
+
 def test_town_driver_fault_is_an_error_not_a_failure(tmp_path,
                                                      monkeypatch):
     import nandatown.a2a_adapter as a2a
