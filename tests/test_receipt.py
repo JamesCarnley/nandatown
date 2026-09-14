@@ -1,15 +1,30 @@
+import hashlib
 import json
 import os
+import re
+import shutil
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from nandatown.a2a_adapter import build_a2a_app, build_agent_card
+from nandatown.bundle import attest_bundle, load_bundle, verify_bundle
 from nandatown.cli import main
 from nandatown.identity_portable import Keystore
-from nandatown.path_runner import run_path_test
-from nandatown.receipt import make_receipt, render_proof, verify_receipt
+from nandatown.path_runner import STRICT_PATH_EVALUATOR_VERSION, run_path_test
+from nandatown.receipt import (
+    DEFAULT_LIMITATIONS,
+    _bundle_receipt_fields,
+    make_receipt,
+    render_proof,
+    replay_disclosures,
+    verify_receipt,
+)
 from nandatown.records import fingerprint
+from nandatown.runner import run_town
+from nandatown.sim.runner import run_lab
+from nandatown.sim.validators import LAB_EVALUATOR_VERSION
 
 
 def passed_bundle(tmp_path):
@@ -217,3 +232,526 @@ def test_signed_receipt_rejects_unrecognized_or_missing_claim_shape(
 
     assert any(expected in problem for problem in detached), detached
     assert any(expected in problem for problem in bundle_aware), bundle_aware
+
+
+# A receipt rests on the bundle it names. Signing or verifying it against a
+# bundle that fails verification must refuse; only an older evaluator
+# version (replay impossible, everything else checked) is accepted, and
+# the output says so.
+
+
+def _edit_json(path, change):
+    path = Path(path)
+    document = json.loads(path.read_text())
+    change(document)
+    path.write_text(json.dumps(document))
+
+
+def _rehash(directory, *names):
+    bundle = Path(directory)
+    manifest_path = bundle / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    for name in names:
+        manifest["files"][name] = "sha256:" + hashlib.sha256(
+            (bundle / name).read_bytes()).hexdigest()
+    manifest["bundle_fingerprint"] = fingerprint(manifest["files"])
+    manifest_path.write_text(json.dumps(manifest))
+
+
+def _edit_records_in_place(directory):
+    """Change the recorded observations without touching the manifest."""
+    bundle = Path(directory)
+    events_path = bundle / "events.jsonl"
+    events = [json.loads(line)
+              for line in events_path.read_text().splitlines()]
+    for event in events:
+        if event["kind"] == "fulfillment_observed":
+            event["detail"]["total_cents"] = 999999
+    events_path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    _edit_json(bundle / "profile.json",
+               lambda profile: profile["expected"].update(total_cents=1))
+    (bundle / "intents.jsonl").write_text("")
+
+
+def _relabel_failed_as_passed(directory):
+    def relabel(result):
+        result["verdict"] = "passed"
+        for stage in result["stages"]:
+            stage["status"] = "passed"
+            stage["note"] = ""
+    _edit_json(Path(directory) / "result.json", relabel)
+
+
+def _sign_unverified_receipt(directory, keys):
+    """Sign what a bundle says about itself without verifying it, as
+    `receipt` did before it checked bundle integrity."""
+    fields = _bundle_receipt_fields(load_bundle(str(directory)))
+    identity = keys.new_identity("reviewer")
+    payload = {"claim": fields["claim"], "observer": identity["agent_id"],
+               "window": fields["window"], "coverage": fields["coverage"],
+               "limitations": DEFAULT_LIMITATIONS,
+               "evidence": fields["evidence"]}
+    path = Path(directory) / "receipt.json"
+    path.write_text(json.dumps({
+        "payload": payload,
+        "signature": keys.sign("reviewer", payload),
+        "controller_public": identity["controller_public"],
+    }))
+    return str(path)
+
+
+def _relabel_evaluator(directory, old_version):
+    """The same records as recorded by an older evaluator release:
+    labelled consistently, rehashed and re-attested."""
+    bundle = Path(directory)
+    _edit_json(bundle / "result.json",
+               lambda result: result.update(evaluator_version=old_version))
+    _edit_json(bundle / "run.json",
+               lambda run: run["releases"].update(evaluator=old_version))
+    _edit_json(bundle / "manifest.json",
+               lambda manifest: manifest.update(evaluator_version=old_version))
+    _rehash(directory, "result.json", "run.json")
+    attest_bundle(str(directory))
+
+
+def test_bundle_edited_after_receipt_no_longer_verifies(tmp_path, capsys):
+    bundle_dir = complete_passed_bundle(tmp_path)
+    path = make_receipt(bundle_dir)
+    _edit_records_in_place(bundle_dir)
+
+    problems = verify_receipt(path, bundle_dir=bundle_dir)
+
+    for name in ("profile.json", "intents.jsonl", "events.jsonl"):
+        assert any(f"{name} hash mismatch" in p for p in problems), problems
+    # Without a bundle, verification still means only key commitment.
+    assert verify_receipt(path) == []
+    assert main(["verify-receipt", path, "--bundle", bundle_dir]) == 1
+    out = capsys.readouterr().out
+    assert "events.jsonl hash mismatch" in out
+    assert "receipt verifies" not in out
+
+
+def test_receipt_refuses_failed_bundle_relabelled_as_passed(tmp_path, capsys):
+    bundle_dir = failed_bundle(tmp_path)
+    _relabel_failed_as_passed(bundle_dir)
+    receipt_path = Path(bundle_dir) / "receipt.json"
+
+    with pytest.raises(ValueError, match="result.json hash mismatch"):
+        make_receipt(bundle_dir)
+    assert not receipt_path.exists()
+    assert main(["receipt", bundle_dir]) == 1
+    assert "result.json hash mismatch" in capsys.readouterr().out
+    assert not receipt_path.exists()
+
+    unverified = _sign_unverified_receipt(
+        bundle_dir, Keystore(str(tmp_path / "keys")))
+    assert verify_receipt(unverified) == []
+    assert main(["verify-receipt", unverified, "--bundle", bundle_dir]) == 1
+    out = capsys.readouterr().out
+    assert "result.json hash mismatch" in out
+    assert "receipt verifies" not in out
+
+
+def _break_fingerprint(directory):
+    _edit_json(Path(directory) / "manifest.json",
+               lambda m: m.update(bundle_fingerprint="sha256:" + "0" * 64))
+
+
+def _break_binding(directory):
+    _edit_json(Path(directory) / "run.json",
+               lambda run: run.update(run_id="other-run"))
+    _rehash(directory, "run.json")
+
+
+def _break_replay(directory):
+    events_path = Path(directory) / "events.jsonl"
+    events = [json.loads(line)
+              for line in events_path.read_text().splitlines()]
+    for event in events:
+        if event["kind"] == "fulfillment_observed":
+            event["detail"]["total_cents"] = 4090
+    events_path.write_text("".join(json.dumps(e) + "\n" for e in events))
+    _rehash(directory, "events.jsonl")
+    attest_bundle(str(directory))
+
+
+def _break_attestation(directory):
+    _edit_json(Path(directory) / "attestation.json",
+               lambda attestation: attestation.update(signature="00"))
+
+
+def _unsupported_evaluator(directory):
+    _edit_json(Path(directory) / "profile.json",
+               lambda profile: profile.update(evaluator="unknown@9"))
+    _rehash(directory, "profile.json")
+
+
+@pytest.mark.parametrize(
+    ("breaker", "expected"),
+    [(_break_fingerprint, "bundle fingerprint mismatch"),
+     (_break_binding, "run and result name different run ids"),
+     (_break_replay, "evaluator replay mismatch"),
+     (_break_attestation, "attestation signature does not verify"),
+     (_unsupported_evaluator, "unsupported path evaluator")],
+    ids=["fingerprint", "binding", "replay", "attestation", "evaluator"],
+)
+def test_receipts_refuse_bundles_that_fail_verification(
+        tmp_path, breaker, expected):
+    bundle_dir = complete_passed_bundle(tmp_path)
+    breaker(bundle_dir)
+    assert any(expected in p for p in verify_bundle(bundle_dir))
+
+    with pytest.raises(ValueError, match=expected):
+        make_receipt(bundle_dir)
+    unverified = _sign_unverified_receipt(
+        bundle_dir, Keystore(str(tmp_path / "keys")))
+    problems = verify_receipt(unverified, bundle_dir)
+
+    assert any(expected in p for p in problems), problems
+
+
+def test_intact_failed_and_partial_bundles_still_get_receipts(
+        tmp_path, capsys):
+    for bundle_dir in (failed_bundle(tmp_path), passed_bundle(tmp_path)):
+        assert main(["receipt", bundle_dir]) == 0
+        assert main(["verify-receipt", f"{bundle_dir}/receipt.json",
+                     "--bundle", bundle_dir]) == 0
+        out = capsys.readouterr().out
+        assert "receipt verifies" in out
+        assert "not checked" not in out
+
+
+def _historical_path_bundle(tmp_path):
+    bundle_dir = complete_passed_bundle(tmp_path)
+    _relabel_evaluator(bundle_dir, "path-0.1")
+    return bundle_dir, "path-0.1", STRICT_PATH_EVALUATOR_VERSION
+
+
+def _historical_lab_bundle(tmp_path):
+    bundle_dir, _ = run_lab("voting", str(tmp_path))
+    _relabel_evaluator(bundle_dir, "lab-0.2.5")
+    return bundle_dir, "lab-0.2.5", LAB_EVALUATOR_VERSION
+
+
+# A Lab bundle recorded by nandatown at cb19e0e, kept verbatim; see its
+# .provenance.json. It is a fixture, not an adoption.
+GENUINE_HISTORICAL_LAB = (Path(__file__).parent / "fixtures"
+                          / "historical-lab-0.2.0-voting")
+
+
+def _genuine_historical_lab_bundle(tmp_path):
+    """A bundle an older Town really wrote, not a relabelled modern one.
+
+    Relabelling cannot stand in for this. A bundle written today records
+    every field today's model has, so reading it back adds nothing; only
+    a document written before those fields existed shows whether the
+    profile binding survives the model gaining them.
+    """
+    directory = tmp_path / "genuine-historical"
+    shutil.copytree(GENUINE_HISTORICAL_LAB, directory)
+    return str(directory), "lab-0.2.0", LAB_EVALUATOR_VERSION
+
+
+def test_genuine_historical_bundle_is_bound_to_the_document_it_recorded():
+    """The fixture must actually exercise the drift, or it proves nothing."""
+    bundle = load_bundle(str(GENUINE_HISTORICAL_LAB))
+    recorded = bundle["run"].profile_fingerprint
+
+    assert recorded == fingerprint(bundle["profile_document"])
+    assert recorded != fingerprint(bundle["profile"].model_dump())
+    # A subset, not an equality: the model gaining another field later is
+    # the very thing this guards against, not a reason to fail here.
+    assert {"plugin_files", "adaptations"} <= (
+        set(bundle["profile"].model_dump())
+        - set(bundle["profile_document"]))
+
+
+def test_genuine_historical_bundle_verifies_apart_from_its_evaluator(
+        tmp_path):
+    bundle_dir, old, local = _genuine_historical_lab_bundle(tmp_path)
+
+    assert verify_bundle(bundle_dir) == [
+        f"evaluator version differs: bundle {old}, local {local};"
+        " reproducibility not checked"]
+
+
+def test_a_rewritten_historical_profile_is_still_refused(tmp_path):
+    """Rehashing hides the edit from the manifest, not from the binding."""
+    bundle_dir, _, _ = _genuine_historical_lab_bundle(tmp_path)
+    _edit_json(Path(bundle_dir) / "profile.json",
+               lambda profile: profile.update(name="something-else"))
+    _rehash(bundle_dir, "profile.json")
+
+    assert "run profile fingerprint does not match profile" in verify_bundle(
+        bundle_dir)
+    with pytest.raises(ValueError, match="does not match profile"):
+        make_receipt(bundle_dir)
+
+
+def test_an_unmodelled_field_added_to_a_profile_is_refused(tmp_path):
+    """The model would drop this field; the recorded document would not."""
+    bundle_dir, _, _ = _genuine_historical_lab_bundle(tmp_path)
+    _edit_json(Path(bundle_dir) / "profile.json",
+               lambda profile: profile.update(smuggled="payload"))
+    _rehash(bundle_dir, "profile.json")
+
+    assert "run profile fingerprint does not match profile" in verify_bundle(
+        bundle_dir)
+
+
+@pytest.mark.parametrize("historical_bundle",
+                         [_historical_path_bundle, _historical_lab_bundle,
+                          _genuine_historical_lab_bundle],
+                         ids=["path", "lab", "genuine-lab"])
+def test_historical_evaluator_bundle_gets_receipt_with_disclosure(
+        tmp_path, capsys, historical_bundle):
+    bundle_dir, old, local = historical_bundle(tmp_path)
+    assert verify_bundle(bundle_dir) == [
+        f"evaluator version differs: bundle {old}, local {local};"
+        " reproducibility not checked"]
+    disclosure = f"evaluator replay not checked: bundle {old}, local {local}"
+
+    path = make_receipt(bundle_dir)
+    assert verify_receipt(path, bundle_dir) == []
+
+    # The disclosure is signed, so it survives the receipt leaving the
+    # bundle behind, and it is stated as well as printed.
+    payload = json.loads(Path(path).read_text())["payload"]
+    assert payload["limitations"][:len(DEFAULT_LIMITATIONS)] == (
+        DEFAULT_LIMITATIONS)
+    assert payload["limitations"][-1].startswith(disclosure)
+    assert replay_disclosures(payload) == [payload["limitations"][-1]]
+
+    assert main(["receipt", bundle_dir]) == 0
+    assert disclosure in capsys.readouterr().out
+    assert main(["verify-receipt", path, "--bundle", bundle_dir]) == 0
+    out = capsys.readouterr().out
+    assert "receipt verifies" in out
+    assert disclosure in out
+    assert main(["verify-receipt", path]) == 0
+    detached = capsys.readouterr().out
+    assert "receipt verifies" in detached
+    assert disclosure in detached
+    # Town Proof still requires a replay under the local evaluator.
+    assert main(["proof", bundle_dir]) == 1
+    assert "evaluator version differs" in capsys.readouterr().out
+
+
+def test_a_replayed_bundle_states_no_replay_disclosure(tmp_path, capsys):
+    """Only a receipt that skipped the replay says so."""
+    bundle_dir = complete_passed_bundle(tmp_path)
+    path = make_receipt(bundle_dir)
+
+    payload = json.loads(Path(path).read_text())["payload"]
+    assert payload["limitations"] == DEFAULT_LIMITATIONS
+    assert replay_disclosures(payload) == []
+    assert main(["verify-receipt", path]) == 0
+    assert "not checked" not in capsys.readouterr().out
+
+
+def test_custom_limitations_cannot_drop_the_replay_disclosure(tmp_path):
+    """A caller states more limitations, never fewer than the truth."""
+    bundle_dir, old, local = _genuine_historical_lab_bundle(tmp_path)
+    mine = ["reviewed by the vendor's own team"]
+
+    path = make_receipt(bundle_dir, limitations=mine)
+
+    payload = json.loads(Path(path).read_text())["payload"]
+    assert payload["limitations"][:1] == mine
+    assert replay_disclosures(payload) == [
+        f"evaluator replay not checked: bundle {old}, local {local};"
+        " the recorded result was not reproduced"]
+    assert verify_receipt(path, bundle_dir) == []
+
+
+@pytest.mark.parametrize(
+    ("breaker", "expected"),
+    [(_edit_records_in_place, "events.jsonl hash mismatch"),
+     (_break_attestation, "attestation signature does not verify")],
+    ids=["records", "attestation"],
+)
+def test_historical_evaluator_bundle_still_refuses_integrity_failures(
+        tmp_path, capsys, breaker, expected):
+    bundle_dir, _, _ = _historical_path_bundle(tmp_path)
+    path = make_receipt(bundle_dir)
+    breaker(bundle_dir)
+
+    assert any(expected in p for p in verify_receipt(path, bundle_dir))
+    with pytest.raises(ValueError, match=expected):
+        make_receipt(bundle_dir)
+    assert main(["receipt", bundle_dir]) == 1
+    assert expected in capsys.readouterr().out
+
+
+def _forge_evaluator_version(directory, version):
+    """Relabel a bundle as passed under an evaluator version: labelled
+    consistently and rehashed, with the attestation dropped, so no key is
+    needed. Only a replay would expose the relabelled verdict."""
+    bundle = Path(directory)
+    _relabel_failed_as_passed(directory)
+    _edit_json(bundle / "result.json",
+               lambda result: result.update(evaluator_version=version))
+    _edit_json(bundle / "run.json",
+               lambda run: run["releases"].update(evaluator=version))
+    _edit_json(bundle / "manifest.json",
+               lambda manifest: manifest.update(evaluator_version=version))
+    _rehash(directory, "result.json", "run.json")
+    (bundle / "attestation.json").unlink(missing_ok=True)
+
+
+def _failed_path_bundle(tmp_path):
+    return failed_bundle(tmp_path), "path"
+
+
+def _lab_bundle(tmp_path):
+    bundle_dir, _ = run_lab("voting", str(tmp_path))
+    return bundle_dir, "lab"
+
+
+def _track_bundle(tmp_path):
+    bundle_dir, _ = run_town("quote-clean", str(tmp_path))
+    return bundle_dir, "track"
+
+
+@pytest.mark.parametrize(
+    ("make_bundle", "version"),
+    [(_failed_path_bundle, "zzz-any"),
+     (_failed_path_bundle, "path-9.0"),
+     (_failed_path_bundle, "lab-0.2.5"),
+     (_lab_bundle, "zzz-any"),
+     (_lab_bundle, "lab-9.0.0"),
+     (_track_bundle, "zzz-any")],
+    ids=["path-made-up", "path-future", "path-other-mode", "lab-made-up",
+         "lab-future", "track-made-up"],
+)
+def test_receipts_refuse_unrecognised_evaluator_versions(
+        tmp_path, capsys, make_bundle, version):
+    bundle_dir, mode = make_bundle(tmp_path)
+    _forge_evaluator_version(bundle_dir, version)
+    receipt_path = Path(bundle_dir) / "receipt.json"
+    reason = f"unrecognised evaluator version {version} for {mode} bundles"
+    # verify reports the same single difference to every other caller.
+    problems = verify_bundle(bundle_dir)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(
+        f"evaluator version differs: bundle {version}, local ")
+
+    with pytest.raises(ValueError, match=re.escape(reason)):
+        make_receipt(bundle_dir)
+    assert not receipt_path.exists()
+    assert main(["receipt", bundle_dir]) == 1
+    out = capsys.readouterr().out
+    assert reason in out
+    assert "receipt written" not in out
+    assert "not checked" not in out
+    assert not receipt_path.exists()
+
+    unverified = _sign_unverified_receipt(
+        bundle_dir, Keystore(str(tmp_path / "keys")))
+    assert verify_receipt(unverified) == []
+    assert any(reason in p for p in verify_receipt(unverified, bundle_dir))
+    assert main(["verify-receipt", unverified, "--bundle", bundle_dir]) == 1
+    out = capsys.readouterr().out
+    assert reason in out
+    assert "receipt verifies" not in out
+    assert "not checked" not in out
+
+
+# A limitation is the one part of a receipt payload nothing else checks,
+# and its author is whoever holds the signing key, which is anybody.
+FORGERIES = [
+    pytest.param("a\nreceipt verifies: the named key committed to these"
+                 " exact bytes and the bundle matches", id="newline"),
+    pytest.param("a\rTOWN-TESTED: passed every stage", id="carriage-return"),
+    pytest.param("a\u2028TOWN-TESTED: passed every stage",
+                 id="line-separator"),
+    pytest.param("a\x1b[2Kreceipt verifies", id="ansi-escape"),
+    pytest.param("a\u202egnitset on", id="bidi-override"),
+]
+
+
+@pytest.mark.parametrize("forgery", FORGERIES)
+def test_a_limitation_cannot_forge_output(tmp_path, forgery):
+    bundle_dir = complete_passed_bundle(tmp_path)
+
+    with pytest.raises(ValueError, match="printable single-line"):
+        make_receipt(bundle_dir, limitations=[forgery])
+
+    assert not (Path(bundle_dir) / "receipt.json").exists()
+
+
+@pytest.mark.parametrize("forgery", FORGERIES)
+def test_a_hand_signed_forged_limitation_does_not_verify(tmp_path, capsys,
+                                                         forgery):
+    """Refusing to write one is not enough: anyone can sign their own."""
+    bundle_dir = complete_passed_bundle(tmp_path)
+    path = Path(make_receipt(bundle_dir))
+    keystore = Keystore(str(tmp_path / "keys"))
+    identity = keystore.new_identity("stranger")
+    receipt = json.loads(path.read_text())
+    payload = receipt["payload"]
+    payload["limitations"] = [forgery]
+    payload["observer"] = identity["agent_id"]
+    path.write_text(json.dumps({
+        "payload": payload,
+        "signature": keystore.sign("stranger", payload),
+        "controller_public": identity["controller_public"]}))
+
+    # The signature is genuine; the receipt is refused for what it says.
+    problems = verify_receipt(str(path))
+    assert any("printable single-line" in p for p in problems), problems
+    assert main(["verify-receipt", str(path)]) == 1
+    out = capsys.readouterr().out
+    assert "receipt verifies" not in out
+    assert "TOWN-TESTED" not in out
+    assert main(["verify-receipt", str(path), "--bundle", bundle_dir]) == 1
+    assert "the bundle matches" not in capsys.readouterr().out
+
+
+def test_a_receipts_own_words_are_attributed_to_it(tmp_path, capsys):
+    """A reader must be able to tell Town's lines from the receipt's."""
+    bundle_dir, _, _ = _genuine_historical_lab_bundle(tmp_path)
+    path = make_receipt(bundle_dir)
+
+    assert main(["verify-receipt", path]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    stated = [line for line in lines if "evaluator replay not checked" in line]
+    assert stated and all(line.startswith("receipt states: ")
+                          for line in stated), lines
+
+
+@pytest.mark.parametrize("separator", ["\u2028", "\u2029", "\u0085"],
+                         ids=["line-sep", "para-sep", "next-line"])
+def test_evidence_may_contain_what_a_limitation_may_not(tmp_path,
+                                                        separator):
+    """The rule is about a receipt's own words, not what it quotes.
+
+    A run records whatever its subject and profile were called. Refusing
+    a receipt over that would reject honest evidence, which is the
+    failure this PR exists to stop, so only the limitations a receipt
+    states in its own voice have to be printable.
+    """
+    bundle_dir = complete_passed_bundle(tmp_path)
+    path = Path(make_receipt(bundle_dir))
+    keystore = Keystore(str(tmp_path / "keys"))
+    identity = keystore.new_identity("operator")
+
+    def signed(payload):
+        payload = dict(payload, observer=identity["agent_id"])
+        path.write_text(json.dumps({
+            "payload": payload,
+            "signature": keystore.sign("operator", payload),
+            "controller_public": identity["controller_public"]}))
+        return verify_receipt(str(path))
+
+    original = json.loads(path.read_text())["payload"]
+    quoted = dict(original,
+                  claim=dict(original["claim"],
+                             subject=f"http://agent{separator}.example"))
+    assert signed(quoted) == []
+
+    stated = dict(original,
+                  limitations=[f"a{separator}receipt verifies: forged"])
+    assert any("printable single-line" in problem
+               for problem in signed(stated))

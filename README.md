@@ -507,8 +507,20 @@ signature proves a named key committed to those bytes, not that the
 observation was true or the agent safe. `proof` renders the
 TOWN-TESTED badge sentence only from passed, fresh, verified evidence with
 an empty `coverage.not_tested` list. Partial or failed receipts remain valid
-signed evidence; they cannot earn this badge. Bundle-aware receipt verification
-also checks that claims, coverage and time window agree with the bundle.
+signed evidence; they cannot earn this badge. `receipt` and bundle-aware
+`verify-receipt` first run the `verify` checks and refuse, naming the problem,
+when hashes, the manifest, cross-record bindings, an attestation or evaluator
+replay fail. A bundle recorded by a known earlier evaluator version for its
+mode (one this project shipped) is still accepted when every other check
+passes: its recorded result is not replayed, and the receipt states
+`evaluator replay not checked` among its signed limitations, so a reader
+who has the receipt but not the bundle still sees it. A bundle naming an
+unrecognised evaluator version is refused. The profile binding is checked
+against the profile document the run recorded, not against a fresh
+serialization, so a bundle stays verifiable when the profile model later
+gains a field. Bundle-aware verification then checks that claims, coverage and time window
+agree with the bundle; without `--bundle` it checks only the receipt's shape
+and signature.
 Review subject URLs, release labels and custom limitations before sharing:
 the receipt is not a universal secret scrubber. A refusal names its reason; the badge is
 narrow and expiring, a policy view over evidence, never the evidence

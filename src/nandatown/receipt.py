@@ -32,6 +32,11 @@ DEFAULT_LIMITATIONS = [
     "a favorable result grants no permissions and endorses nothing",
 ]
 
+# A receipt states this among its limitations when its bundle was accepted
+# on the strength of a known earlier evaluator version rather than replayed.
+# Callers match on the prefix, so it stays stable.
+REPLAY_DISCLOSURE_PREFIX = "evaluator replay not checked: "
+
 RECEIPT_FIELDS = {"payload", "signature", "controller_public"}
 PAYLOAD_FIELDS = {
     "claim", "observer", "window", "coverage", "limitations", "evidence",
@@ -64,6 +69,24 @@ def _field_set_problems(value: dict[str, Any], label: str,
 
 def _nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _printable_string(value: Any) -> bool:
+    """A string a reader can be shown on one line, as written.
+
+    A receipt's limitations are printed beside what the verifier itself
+    says, so a newline in one would let the receipt's own author write
+    extra output lines, and a bidi or other format character would let
+    them reorder or hide one. str.isprintable is False for exactly
+    those: control, format, surrogate and line or paragraph separator
+    characters.
+
+    This applies to what a receipt states in its own words, not to
+    what it quotes from the bundle. A profile name or subject may
+    contain anything the run recorded, and refusing those here would
+    reject honest evidence rather than prevent anything.
+    """
+    return _nonempty_string(value) and value.isprintable()
 
 
 def _receipt_shape_problems(receipt: dict[str, Any],
@@ -131,9 +154,10 @@ def _receipt_shape_problems(receipt: dict[str, Any],
 
     limitations = payload.get("limitations")
     if not isinstance(limitations, list) or not limitations \
-            or any(not _nonempty_string(value) for value in limitations):
+            or any(not _printable_string(value) for value in limitations):
         problems.append(
-            "receipt limitations must be a non-empty list of non-empty strings")
+            "receipt limitations must be a non-empty list of non-empty"
+            " printable single-line strings")
 
     evidence = payload.get("evidence")
     if not isinstance(evidence, dict):
@@ -235,9 +259,51 @@ def _bundle_receipt_fields(bundle: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def bundle_receipt_check(bundle_dir: str) -> tuple[list[str], str | None]:
+    """Whether a receipt may rest on this bundle.
+
+    Returns the bundle's integrity problems, any one of which refuses a
+    receipt, and a disclosure for a bundle recorded by a known earlier
+    evaluator version (bundle.SHIPPED_EVALUATOR_VERSIONS for its mode):
+    its hashes, manifest, bindings and attestation were verified, but its
+    recorded result was not replayed. An unrecognised evaluator version is
+    an integrity problem. The disclosure is command output; the signed
+    receipt does not record it."""
+    from .bundle import verify_bundle_integrity
+
+    problems, differs = verify_bundle_integrity(bundle_dir)
+    disclosure = None
+    if differs is not None:
+        disclosure = (
+            f"{REPLAY_DISCLOSURE_PREFIX}bundle {differs.bundle_version},"
+            f" local {differs.local_version}; the recorded result was not"
+            " reproduced")
+    return problems, disclosure
+
+
+def replay_disclosures(payload: dict) -> list[str]:
+    """The replay disclosures a receipt payload states for itself.
+
+    A receipt is read where its bundle is not, so what it says about its
+    own basis has to be in the signed payload. This reads that back."""
+    limitations = payload.get("limitations")
+    if not isinstance(limitations, list):
+        return []
+    return [value for value in limitations
+            if isinstance(value, str)
+            and value.startswith(REPLAY_DISCLOSURE_PREFIX)]
+
+
 def make_receipt(bundle_dir: str, keystore=None,
                  signer: str | None = None,
                  limitations: list[str] | None = None) -> str:
+    """Sign a sanitized receipt over a bundle; returns its path.
+
+    Raises ValueError, naming each problem, when the bundle fails
+    bundle_receipt_check. A bundle recorded by a known earlier evaluator
+    version is accepted without replay, and the receipt states that among
+    its signed limitations, so the disclosure travels with the receipt to
+    a reader who does not have the bundle."""
     from .bundle import load_bundle
     from .identity_portable import (
         OPERATOR_NAME,
@@ -249,6 +315,10 @@ def make_receipt(bundle_dir: str, keystore=None,
     path_problem = _receipt_file_problem(path, missing_ok=True)
     if path_problem:
         raise ValueError(f"refusing to write receipt: {path_problem}")
+    bundle_problems, disclosure = bundle_receipt_check(bundle_dir)
+    if bundle_problems:
+        raise ValueError("refusing to write receipt: the bundle does not"
+                         " verify: " + "; ".join(bundle_problems))
 
     bundle = load_bundle(bundle_dir)
     fields = _bundle_receipt_fields(bundle)
@@ -257,12 +327,27 @@ def make_receipt(bundle_dir: str, keystore=None,
     signer = signer or OPERATOR_NAME
     identity = keystore.new_identity(signer)
 
+    # The disclosure is appended to whatever limitations the caller states
+    # rather than replacing them: it is one more thing that is true of this
+    # receipt, and a caller cannot drop it by supplying its own list.
+    stated = list(limitations or DEFAULT_LIMITATIONS)
+    unprintable = [value for value in stated if not _printable_string(value)]
+    if unprintable:
+        raise ValueError(
+            "refusing to write receipt: a limitation must be a non-empty"
+            " printable single-line string, so that stating one cannot"
+            f" forge output; refused {unprintable[0][:60]!r}"
+            if isinstance(unprintable[0], str) else
+            "refusing to write receipt: a limitation must be a non-empty"
+            " printable single-line string")
+    if disclosure:
+        stated.append(disclosure)
     payload = {
         "claim": fields["claim"],
         "observer": identity["agent_id"],
         "window": fields["window"],
         "coverage": fields["coverage"],
-        "limitations": limitations or DEFAULT_LIMITATIONS,
+        "limitations": stated,
         "evidence": fields["evidence"],
     }
     receipt = {"payload": payload,
@@ -276,7 +361,19 @@ def make_receipt(bundle_dir: str, keystore=None,
 def verify_receipt(receipt_path: str,
                    bundle_dir: str | None = None) -> list[str]:
     """Offline verification. Returns problems; empty means the receipt
-    verifies (which still proves commitment, not truth)."""
+    verifies (which still proves commitment, not truth). With a bundle,
+    the bundle must also pass bundle_receipt_check and match every
+    receipt claim. An empty result means the receipt verifies, not that
+    the result was replayed; a receipt over a bundle recorded by a known
+    earlier evaluator version states that among its limitations, and
+    replay_disclosures reads it back.
+
+    Limitations are not compared with the bundle. They record what was
+    true when the receipt was signed, and a later Town upgrade must not
+    make an honest receipt verify as wrong. So an empty result does not
+    say that a receipt's limitations are complete either: for what is
+    true of a bundle now, call bundle_receipt_check on it, as the
+    `verify-receipt --bundle` command does."""
     from .identity_portable import verify_signature
 
     problems: list[str] = []
@@ -305,6 +402,11 @@ def verify_receipt(receipt_path: str,
     if bundle_dir:
         from .bundle import load_bundle
 
+        bundle_problems, _ = bundle_receipt_check(bundle_dir)
+        if bundle_problems:
+            problems.extend(f"bundle does not verify: {problem}"
+                            for problem in bundle_problems)
+            return problems
         try:
             bundle = load_bundle(bundle_dir)
         except (OSError, json.JSONDecodeError, KeyError, TypeError,
