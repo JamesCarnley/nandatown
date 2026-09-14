@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 import time
 import uuid
@@ -213,6 +214,14 @@ def run_path_test(subject_url: str | None, out_dir: str,
         artifact_text, artifact_texts, fetch_card, send_message,
     )
 
+    if subject_url and index_file:
+        # The index entry chooses the endpoint; the evidence must not name
+        # a different URL as the subject.
+        raise ValueError("give either a subject URL or an index file, not"
+                         " both")
+    if index_file and not agent_name:
+        raise ValueError("an index file needs an agent name to choose its"
+                         " entry")
     profile = get_path_profile(profile_ref or DEFAULT_PATH_PROFILE)
     strict_semantics = _strict_path_semantics(profile)
     run_id = "path-" + uuid.uuid4().hex[:12]
@@ -353,14 +362,17 @@ def run_path_test(subject_url: str | None, out_dir: str,
 
     result = evaluate_path(profile, run_id, recorder.events)
 
-    rerun = "nandatown test-agent"
+    # Quoted per argument: a shell must not split a URL at "&" or a path at
+    # a space and silently rerun a different subject or profile.
+    rerun_argv = ["nandatown", "test-agent"]
     if index_file:
-        rerun += f" --index {index_file} --agent-name {agent_name}"
+        rerun_argv += ["--index", index_file, "--agent-name", str(agent_name)]
     else:
-        rerun += f" --url {subject_url}"
-    rerun += f" --path-profile {profile.ref}"
+        rerun_argv += ["--url", str(subject_url)]
+    rerun_argv += ["--path-profile", profile.ref]
     if pin_card_digest:
-        rerun += f" --pin-card-digest {pin_card_digest}"
+        rerun_argv += ["--pin-card-digest", pin_card_digest]
+    rerun = shlex.join(rerun_argv)
 
     run_record = RunRecord(
         run_id=run_id,

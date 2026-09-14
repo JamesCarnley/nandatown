@@ -99,6 +99,13 @@ def cmd_test_agent(args: argparse.Namespace) -> int:
             print("--profile selects a Track profile; use --path-profile"
                   " with --url or --index")
             return 2
+        if args.url and args.index:
+            print("give either --url or --index, not both: the index"
+                  " entry chooses the endpoint that is tested")
+            return 2
+        if args.index and not args.agent_name:
+            print("--index needs --agent-name to choose the index entry")
+            return 2
         print(f"nandatown {__version__}: path test of"
               f" {args.url or args.agent_name} under profile"
               f" {args.path_profile}")

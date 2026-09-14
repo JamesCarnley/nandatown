@@ -376,3 +376,81 @@ def test_generated_rerun_keeps_explicit_path_profile_when_default_changes(
     finally:
         process.terminate()
         process.wait()
+
+
+def _write_index(path, url=SUBJECT):
+    path.write_text(json.dumps({"agents": {"seller": {"url": url}}}))
+    return str(path)
+
+
+def test_url_and_index_together_are_refused_before_any_contact(
+        tmp_path, capsys):
+    """Catches a pass credited to --url while --index chose the agent."""
+    from nandatown.cli import main
+
+    index = _write_index(tmp_path / "index.json", "http://127.0.0.1:9")
+    out = tmp_path / "runs"
+
+    assert main(["test-agent", "--url", "http://127.0.0.1:9",
+                 "--index", index, "--agent-name", "seller",
+                 "--out", str(out)]) == 2
+    assert "either --url or --index" in capsys.readouterr().out
+    assert not out.exists()
+    with pytest.raises(ValueError, match="either a subject URL or an index"):
+        run_path_test("http://127.0.0.1:9", str(out), index_file=index,
+                      agent_name="seller")
+    assert not out.exists()
+
+
+def test_index_without_agent_name_is_refused(tmp_path, capsys):
+    from nandatown.cli import main
+
+    index = _write_index(tmp_path / "index.json")
+    out = tmp_path / "runs"
+
+    assert main(["test-agent", "--index", index, "--out", str(out)]) == 2
+    assert "--agent-name" in capsys.readouterr().out
+    assert not out.exists()
+
+
+def test_run_path_test_refuses_index_without_agent_name(tmp_path):
+    index = _write_index(tmp_path / "index.json")
+
+    with pytest.raises(ValueError, match="needs an agent name"):
+        run_path_test(None, str(tmp_path / "runs"), index_file=index)
+    assert not (tmp_path / "runs").exists()
+
+
+def _shell_argv(command):
+    """The argv a POSIX shell gives the recorded command, without running it."""
+    shown = subprocess.run(
+        ["/bin/sh", "-c", 'nandatown() { printf "%s\\n" "$@"; }\n' + command],
+        capture_output=True, text=True, timeout=10)
+    return shown.returncode, shown.stdout.splitlines()
+
+
+@pytest.mark.skipif(not os.path.exists("/bin/sh"), reason="needs /bin/sh")
+@pytest.mark.parametrize("via_index", [False, True])
+def test_generated_rerun_survives_a_real_shell(tmp_path, via_index):
+    """Catches shell metacharacters splitting the rerun into a different test."""
+    pin = "sha256:" + "0" * 64
+    if via_index:
+        index = _write_index(tmp_path / "my index.json")
+        subject, locator = None, ["--index", index, "--agent-name", "seller"]
+    else:
+        subject = SUBJECT + "/agents/x?tenant=alpha&region=eu"
+        index, locator = None, ["--url", subject]
+    with client() as http:
+        bundle_dir, _ = run_path_test(
+            subject, str(tmp_path / "runs"),
+            profile_ref="a2a-quote-intent@0.2", pin_card_digest=pin,
+            index_file=index, agent_name="seller" if via_index else None,
+            http=http)
+    rerun = load_bundle(bundle_dir)["run"].config["rerun_command"]
+
+    returncode, argv = _shell_argv(rerun)
+
+    assert returncode == 0, rerun
+    assert argv == ["test-agent", *locator,
+                    "--path-profile", "a2a-quote-intent@0.2",
+                    "--pin-card-digest", pin]
