@@ -352,7 +352,12 @@ def cmd_campaign(args: argparse.Namespace) -> int:
 
 
 def cmd_pulse(args: argparse.Namespace) -> int:
-    from .pulse import export_records, render_pulse_report, run_pulse
+    from .pulse import (
+        export_records,
+        render_pulse_report,
+        run_pulse,
+        unprobeable,
+    )
 
     if args.report:
         print(render_pulse_report(args.db), end="")
@@ -369,6 +374,15 @@ def cmd_pulse(args: argparse.Namespace) -> int:
         name, _, url = target.partition("=")
         if not url:
             print(f"target {target!r} must look like name=url")
+            return 2
+        if name in targets:
+            print(f"target name {name!r} is given more than once; give"
+                  " each --target a distinct name")
+            return 2
+        problem = unprobeable(url)
+        if problem is not None:
+            print(f"target {name!r} has an unusable URL {url!r}:"
+                  f" {problem}")
             return 2
         targets[name] = url
     if not targets:
