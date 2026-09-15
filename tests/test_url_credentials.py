@@ -698,6 +698,100 @@ def test_a_fulfillment_preview_cannot_cut_credentials_short(tmp_path):
     assert files_containing(bundle, SECRET) == []
 
 
+@contextlib.contextmanager
+def serving_agent(card, text):
+    """A stdlib A2A agent on localhost with this card, answering each
+    message/send with one completed task whose text part is text(base),
+    where base is the agent's own host and port."""
+    class Agent(http.server.BaseHTTPRequestHandler):
+        def respond(self, body):
+            payload = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            self.respond(card)
+
+        def do_POST(self):
+            envelope = json.loads(self.rfile.read(
+                int(self.headers["Content-Length"])))
+            self.respond({"jsonrpc": "2.0", "id": envelope["id"], "result": {
+                "id": "t1", "kind": "task", "status": {"state": "completed"},
+                "artifacts": [{"artifactId": "a", "parts": [
+                    {"kind": "text", "text": text(base)}]}]}})
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Agent)
+    base = f"127.0.0.1:{server.server_port}"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield base
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def nested(depth, leaf):
+    value = leaf
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize("shape", [
+    pytest.param(lambda cut: cut, id="text"),
+    pytest.param(lambda cut: [cut], id="list"),
+    pytest.param(lambda cut: {"echo": cut}, id="object"),
+])
+def test_a2a_test_withholds_before_cutting_its_artifact_preview(capsys,
+                                                                shape):
+    """The artifact preview keeps 200 characters: here, the password and
+    not its "@"."""
+    def artifact(base):
+        url = f"http://{USER}:{SECRET}@{base}"
+        return shape("x" * (200 - len(f"http://{USER}:{SECRET}")) + url)
+
+    with serving_agent(build_agent_card("http://127.0.0.1:9"),
+                       artifact) as base:
+        main(["a2a", "test", f"http://{USER}:{SECRET}@{base}"])
+
+    assert SECRET not in capsys.readouterr().out
+
+
+def test_deeply_nested_agent_output_is_the_agents_failure_not_towns(
+        tmp_path, capsys):
+    """Withholding walks everything an agent returns, however deep."""
+    deep = nested(600, "http://127.0.0.1:9")
+    card = dict(build_agent_card("http://127.0.0.1:9"), name=deep)
+    with serving_agent(card, lambda base: deep) as base:
+        url = f"http://{USER}:{SECRET}@{base}"
+        assert main(["a2a", "test", url]) in (0, 1)
+        bundle, result = run_path_test(url, str(tmp_path / "runs"))
+
+    assert SECRET not in capsys.readouterr().out
+    kinds = [e.kind for e in load_bundle(bundle)["events"]]
+    assert "town_driver_error" not in kinds
+    assert "fulfillment_unparseable" in kinds
+    assert result.verdict == "failed"
+
+
+def test_credentials_are_withheld_with_or_without_an_empty_password():
+    """httpx sends "tok" and "tok:" as the same credentials."""
+    for operator, echoed in [("http://tok@h", "http://tok:@h"),
+                             ("http://tok:@h", "http://tok@h")]:
+        scrubber = Scrubber(LABEL)
+        scrubber.register(operator)
+        assert "tok" not in scrubber(f"see {echoed}/x"), (operator, echoed)
+    scrubber = Scrubber(LABEL)
+    scrubber.register("http://a:b:@h")
+    assert scrubber("http://a:b@h") == "http://a:b@h"
+
+
 def test_an_operators_user_name_in_agent_text_is_left_alone(tmp_path):
     name = "contact admin@example.com"
 

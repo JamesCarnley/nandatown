@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request
 
 from . import __version__
 from .path_profiles import QUOTE_INTENT_FIELDS
+from .url_credentials import scrub
 from .a2a_transport import (
     DEFAULT_MAX_RESPONSE_BYTES,
     HTTPStatusError,
@@ -248,7 +249,12 @@ def probe_endpoint(base_url: str, http: httpx.Client | None = None,
             http=http)
         report["task_state"] = task.get("status", {}).get("state")
         text = artifact_text(task)
-        report["artifact"] = (redact(text) if redact else text)[:200]
+        if redact:
+            text = scrub(text, redact)
+        # A text part that is not text is shown as it came, cut only if
+        # it can be.
+        report["artifact"] = (text[:200] if isinstance(text, (str, list))
+                              else text)
         if task.get("kind") != "task":
             report["problems"].append("message/send did not return a"
                                       " task")

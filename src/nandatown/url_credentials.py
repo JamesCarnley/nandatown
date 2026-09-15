@@ -356,6 +356,10 @@ class Scrubber:
         parsed = _parses(url[scheme.start():].strip())
         if parsed is not None:
             spellings.add(parsed.userinfo.decode("ascii", "replace"))
+        # httpx sends "tok" and "tok:" as the same credentials.
+        spellings |= {s + ":" for s in spellings if ":" not in s}
+        spellings |= {s[:-1] for s in spellings
+                      if s.endswith(":") and s.count(":") == 1}
         # shlex.quote writes a quote inside single quotes as '"'"'.
         spellings |= {s.replace("'", "'\"'\"'") for s in spellings if "'" in s}
         for spelling in spellings:
@@ -374,11 +378,34 @@ class Scrubber:
 
 
 def scrub(value: Any, text: Callable[[str], str]) -> Any:
-    """Apply text to every string in a JSON-shaped value, keys included."""
-    if isinstance(value, str):
-        return text(value)
-    if isinstance(value, dict):
-        return {scrub(k, text): scrub(v, text) for k, v in value.items()}
-    if isinstance(value, list):
-        return [scrub(v, text) for v in value]
-    return value
+    """Apply text to every string in a JSON-shaped value, keys included.
+
+    Iterative, so an agent's output nested deeper than Python's recursion
+    limit is copied like any other rather than failing Town.
+    """
+    def copy(item: Any) -> tuple[Any, Any]:
+        if isinstance(item, str):
+            return text(item), None
+        if isinstance(item, dict):
+            return {}, item
+        if isinstance(item, list):
+            return [], item
+        return item, None
+
+    result, source = copy(value)
+    pending = [] if source is None else [(result, source)]
+    while pending:
+        target, source = pending.pop()
+        if isinstance(source, dict):
+            for key, item in source.items():
+                shown, inner = copy(item)
+                target[text(key) if isinstance(key, str) else key] = shown
+                if inner is not None:
+                    pending.append((shown, inner))
+        else:
+            for item in source:
+                shown, inner = copy(item)
+                target.append(shown)
+                if inner is not None:
+                    pending.append((shown, inner))
+    return result

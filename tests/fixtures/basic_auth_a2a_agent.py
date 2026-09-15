@@ -2,10 +2,8 @@
 
 A test fixture for credential handling, not an independent agent. It
 answers only when the request carries argv[2]:argv[3] as basic auth, and
-everything else gets 401.
- With a fourth argument,
-"advertise", its agent card names the URL with those credentials in it, as a
-careless card might.
+everything else gets 401. With a fourth argument, "advertise", its agent
+card names the URL with those credentials in it, as a careless card might.
 """
 import base64
 import sys
