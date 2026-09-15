@@ -18,9 +18,9 @@ a label:
 Credentials are found where httpx finds them, in the URL's own authority,
 not by searching text for things that look like URLs. A run registers the
 operator's locator, and only the exact credentials it carries are replaced
-in what the run records, so an agent's own text is recorded as it said it;
-a display of old evidence withholds the same credentials wherever they
-appear in a URL. Only user information is recognised: a secret in a query
+in what the run records: an agent's own text is changed only where it
+repeats those exact credentials between "://" and "@", as a display of old
+evidence also withholds them. Only user information is recognised: a secret in a query
 string or a header is not. Nor, when the URL still parses, is a password
 holding an unencoded "/", "?" or "#", which httpx reads as the end of the
 host: the rest of it is used, printed and recorded as written, because it

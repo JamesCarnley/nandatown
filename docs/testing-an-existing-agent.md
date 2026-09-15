@@ -84,7 +84,7 @@ credentials were never written down.
 
 Town recognises credentials only where httpx finds them: everything before the
 last `@` that comes before the first `/`, `?` or `#`. A password may contain
-quotes, brackets or spaces. Two kinds of secret are not recognised:
+quotes, brackets or spaces. Two kinds of secret can go unrecognised:
 
 - **A `/`, `?` or `#` in a password.** Percent-encode it (as `%2F`, `%3F`,
   `%23`). Unencoded, httpx ends the host at that character, and what happens
@@ -95,10 +95,10 @@ quotes, brackets or spaces. Two kinds of secret are not recognised:
   - **It still reads as a host,** as in `http://user:1234/word@host`,
     `http://token/word@host` or `http://user:a@b/c@host`. The URL goes to the
     host before that character (`user`, `token` and `b` in these examples),
-    with no credentials or only the part of the password before an `@`. The rest of the password is used, printed and
-    recorded as part of the URL, exactly as written. Town cannot tell it from an
-    ordinary `@` in a path, such as `/users/a@b`, so it neither refuses nor
-    rewrites the URL. `test-agent --url`, `a2a test` and `pulse` print a note,
+    with no credentials or only the part of the password before an `@`, which
+    is recognised. The rest of the password is printed and recorded as part of
+    the URL, exactly as written. Town cannot tell it from an ordinary `@` in a
+    path, such as `/users/a@b`, so it neither refuses nor rewrites the URL. `test-agent --url`, `a2a test` and `pulse` print a note,
     without the URL, when they see an `@` after the host; a URL read from an
     `--index` file gets no note.
 - **A secret anywhere else,** such as a token in a query string or a header,
