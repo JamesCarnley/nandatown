@@ -28,6 +28,7 @@ import pytest
 
 from nandatown.a2a_adapter import build_agent_card
 from nandatown.bundle import load_bundle, verify_bundle
+from nandatown.replay import render_replay
 from nandatown.cli import main
 from nandatown.path_runner import run_path_test
 from nandatown.pulse import (
@@ -758,6 +759,38 @@ def test_reports_withhold_an_old_track_password_holding_a_space(old_bundle):
 
     assert "Spaced" not in report and "Out@" not in report
     assert "refused the connection" in report
+
+
+def test_the_visualizer_of_old_evidence_withholds_its_credentials(
+        old_bundle, tmp_path, capsys):
+    before = {p.name: p.read_bytes() for p in old_bundle.iterdir()}
+    out = tmp_path / "town.html"
+
+    assert main(["visualize", str(old_bundle), "-o", str(out)]) == 0
+
+    html = out.read_text()
+    assert OLD_SECRET not in html and OLD_SECRET not in capsys.readouterr().out
+    assert "credentials withheld" in html.replace("\\u003c", "<")
+    assert {p.name: p.read_bytes() for p in old_bundle.iterdir()} == before
+
+
+def test_a_replay_of_old_evidence_withholds_its_credentials():
+    """An old Track run recorded its harness URL raw, and an event could
+    quote it. Replay prints each event's detail as JSON, where a quote in
+    the password is escaped, so it withholds before printing."""
+    bundle = load_bundle(str(FIXTURES / "track-0.2.0" / "quote-clean-dupresp"))
+    url = 'http://trk:Quo"ted-Pw@127.0.0.1:8940'
+    bundle["run"] = bundle["run"].model_copy(update={"config": dict(
+        bundle["run"].config, harnesses={"seller": f"a2a:{url}"})})
+    events = list(bundle["events"])
+    events[0] = events[0].model_copy(update={
+        "subject": url, "detail": {"note": f"A2A endpoint {url} refused"}})
+    bundle["events"] = events
+
+    replay = render_replay(bundle)
+
+    assert "Quo" not in replay and "ted-Pw" not in replay, replay
+    assert "refused" in replay
 
 
 def test_reports_of_old_evidence_withhold_its_credentials(old_bundle):

@@ -102,8 +102,9 @@ Pulse history read from another home labels its older entries afresh. A Town
 from before this change reports a new receipt's withheld subject as not matching
 its bundle when checked with `--bundle`; checked without it, the receipt
 verifies. Evidence recorded by an earlier Town still holds credentials on disk:
-reports and new receipts withhold the ones Town recognises, but the bundle itself
-is left as recorded, so rerun rather than share it.
+reports, `replay`, `visualize` and new receipts withhold the ones Town
+recognises, but the bundle itself is left as recorded, so rerun rather than
+share it.
 
 For local A2A calibration, run `nandatown a2a serve --port 8940` in another
 terminal first. Stop it with Ctrl-C when finished. To test your own agent,
