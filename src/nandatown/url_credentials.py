@@ -1,4 +1,4 @@
-"""Credentials written into an endpoint URL: used, never recorded.
+"""Credentials recognised in an endpoint URL: used, never recorded.
 
 An operator can reach an endpoint that wants basic authentication by
 writing the credentials into its URL, as in ``http://user:secret@host``;
@@ -20,7 +20,10 @@ not by searching text for things that look like URLs. A run registers the
 operator's locator, and only the exact credentials it carries are replaced
 in what the run records, so an agent's own text is never rewritten. Only
 user information is recognised: a secret in a query string or a header is
-not.
+not. Nor is a password holding an unencoded "/", "?" or "#", which httpx
+reads as the end of the host: the URL is sent, printed and recorded as
+written, because it cannot be told from an "@" in a path. at_after_host
+lets a caller point that out without repeating the URL.
 """
 
 from __future__ import annotations
@@ -117,7 +120,8 @@ def withhold(url: str) -> str:
 AT_AFTER_HOST_NOTE = (
     "If part of it is a password or token, percent-encode any '/', '?' or"
     " '#' in it (as %2F, %3F, %23): unencoded, httpx reads them as the end"
-    " of the host, and what follows is sent and recorded as written.")
+    " of the host, Town cannot recognise the credentials, and what follows"
+    " is sent, printed and recorded as written.")
 
 
 def at_after_host(url: object) -> bool:

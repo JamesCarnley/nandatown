@@ -481,9 +481,9 @@ def cmd_receipt(args: argparse.Namespace) -> int:
         return 1
     print(f"receipt written to {path}")
     print("signed: the claim, digests, observer, window, coverage and"
-          " limitations. Credentials in the subject URL are withheld, but"
-          " the rest of the claim and any custom limitations are copied as"
-          " recorded: review them before sharing")
+          " limitations. Credentials Town recognises in the subject URL are"
+          " withheld, but the rest of the claim and any custom limitations"
+          " are copied as recorded: review them before sharing")
     if disclosure:
         print(disclosure)
     return 0

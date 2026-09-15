@@ -595,6 +595,21 @@ def test_a_url_with_leading_whitespace_does_not_leak(tmp_path, capsys):
     assert files_containing(bundle, "LeadPw1") == []
 
 
+def test_a_password_town_cannot_recognise_is_used_as_written(tmp_path,
+                                                             capsys):
+    """The documented limit: "9/Unseen1" as a password reads as port 9 and a
+    path. Town neither refuses nor rewrites the URL, says it cannot
+    recognise the credentials, and records the URL exactly as written."""
+    url = "http://127.0.0.1:9/Unseen1@127.0.0.1:9"
+
+    code, out, bundle = bundle_of(capsys, [
+        "test-agent", "--url", url, "--out", str(tmp_path / "runs")])
+
+    assert "cannot recognise the credentials" in out
+    assert url not in out.split("note:")[1].splitlines()[0]
+    assert load_bundle(bundle)["run"].config["subject"] == url
+
+
 def test_an_ambiguous_at_sign_is_pointed_out(tmp_path, capsys):
     code, out, _bundle = bundle_of(capsys, [
         "test-agent", "--url", f"http://{USER}:2024/Pw1@127.0.0.1:9",
