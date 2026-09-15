@@ -56,37 +56,35 @@ def probe(url: str, timeout: float = 3.0) -> dict[str, Any]:
     # httpx prepares the next request for every redirect, even one it will
     # not follow, and that raises for a Location it cannot use (an invalid
     # URL, or an undecodable punycode host) after the server has already
-    # answered. The response hook runs just before, so keep that answer.
+    # answered. The response hook runs just before, so keep that answer,
+    # with its body: a body that fails to arrive fails the probe, redirect
+    # or not.
     answered: list[httpx.Response] = []
-    unusable = (httpx.HTTPError, httpx.InvalidURL, UnicodeError)
+
+    def keep(response: httpx.Response) -> None:
+        response.read()
+        answered.append(response)
+
     try:
         with httpx.Client(timeout=timeout,
-                          event_hooks={"response": [answered.append]}) \
-                as client:
+                          event_hooks={"response": [keep]}) as client:
             try:
-                response = client.send(client.build_request("GET", url),
-                                       stream=True)
-            except unusable:
-                # Only building the redirect runs between the hook and
-                # send returning, so this is the server's own redirect.
-                # Pulse does not follow redirects, so its status is the
-                # probe's result: a service that answered is not down.
+                response = client.get(url)
+            except (httpx.HTTPError, httpx.InvalidURL, UnicodeError):
+                # Once the hook has kept a redirect, only building the next
+                # request runs before get returns. Pulse does not follow
+                # redirects, so the redirect itself is the probe's result:
+                # a service that answered is not down.
                 if answered and answered[-1].has_redirect_location:
-                    return {"ok": answered[-1].status_code < 500,
-                            "status": answered[-1].status_code,
+                    return {"ok": True, "status": answered[-1].status_code,
                             "latency_ms": round(
                                 (time.time() - started) * 1000, 1),
                             "error": "unusable redirect location"}
                 raise
-            # A body that fails to arrive is still a failed probe.
-            try:
-                response.read()
-            finally:
-                response.close()
         return {"ok": response.status_code < 500,
                 "status": response.status_code,
                 "latency_ms": round((time.time() - started) * 1000, 1)}
-    except unusable as exc:
+    except httpx.HTTPError as exc:
         return outcome(type(exc).__name__)
 
 

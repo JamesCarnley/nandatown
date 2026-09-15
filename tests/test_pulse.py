@@ -3,6 +3,7 @@ import socket
 import threading
 
 from nandatown.cli import main
+import httpx
 import pytest
 
 from nandatown.pulse import (
@@ -351,10 +352,11 @@ def test_a_well_formed_redirect_is_unchanged():
 
 class TruncatedBodyHandler(http.server.BaseHTTPRequestHandler):
     status = 200
+    location = "http://127.0.0.1:9/elsewhere"
 
     def do_GET(self):
         self.send_response(self.status)
-        self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+        self.send_header("Location", self.location)
         self.send_header("Content-Length", "100")
         self.end_headers()
         self.wfile.write(b"too short")
@@ -365,11 +367,17 @@ class TruncatedBodyHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-@pytest.mark.parametrize("status", [200, 302])
-def test_a_body_that_never_arrives_is_still_a_failed_probe(status):
+@pytest.mark.parametrize("status,location", [
+    pytest.param(200, "http://127.0.0.1:9/elsewhere", id="200"),
+    pytest.param(302, "http://127.0.0.1:9/elsewhere", id="302"),
+    pytest.param(302, "http://xn--a.localhost:9/", id="302-undecodable"),
+    pytest.param(302, "http://[::1/", id="302-invalid-url"),
+])
+def test_a_body_that_never_arrives_is_still_a_failed_probe(status, location):
     """Only a redirect httpx cannot build is kept as the server's answer:
     a response whose body is cut short, redirect or not, is a failure."""
-    handler = type("Handler", (TruncatedBodyHandler,), {"status": status})
+    handler = type("Handler", (TruncatedBodyHandler,),
+                   {"status": status, "location": location})
     server = http.server.HTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -380,3 +388,20 @@ def test_a_body_that_never_arrives_is_still_a_failed_probe(status):
 
     assert (result["ok"], result["status"]) == (False, 0)
     assert result["error"] == "RemoteProtocolError"
+
+
+def test_an_unusable_proxy_setting_is_not_recorded_as_every_service_down(
+        monkeypatch):
+    """A proxy the environment names but httpx cannot use is this machine's
+    misconfiguration, not the target's, and is not taken for a redirect."""
+    server, url = start_redirect_server("http://xn--a.localhost:9/")
+    for name in ("ALL_PROXY", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.setenv(name, "http://[::1")
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    try:
+        with pytest.raises(httpx.InvalidURL):
+            probe(url)
+    finally:
+        server.shutdown()
+        server.server_close()
