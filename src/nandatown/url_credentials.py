@@ -202,7 +202,17 @@ def _publish_without_links(staged: str, path: str) -> None:
     except FileExistsError:
         return
     os.close(claim)
-    os.replace(staged, path)
+    deadline = time.monotonic() + _PUBLISH_WAIT_SECONDS
+    while True:
+        try:
+            os.replace(staged, path)
+            return
+        except PermissionError:
+            # Windows refuses to replace a file another process has open,
+            # as a reader waiting for this key briefly does.
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.02)
 
 
 _PUBLISH_WAIT_SECONDS = 5.0
@@ -211,21 +221,23 @@ _PUBLISH_WAIT_SECONDS = 5.0
 def _read_key(path: str) -> bytes | None:
     """The key at path; None if there is none yet.
 
-    A key is only ever published whole, so an empty file is another
+    A key is only ever published whole, so a new empty file is another
     process's claim on the path, still being published, and is waited for.
-    Any other length is a damaged key, and saying so at once is better
-    than labelling with it.
+    An empty file older than publishing takes was abandoned, and any other
+    length is a damaged key: saying so at once is better than waiting, or
+    labelling with it.
     """
     deadline = time.monotonic() + _PUBLISH_WAIT_SECONDS
     while True:
         try:
             with open(path, "rb") as f:
                 key = f.read()
+                age = time.time() - os.fstat(f.fileno()).st_mtime
         except FileNotFoundError:
             return None
         if len(key) == _KEY_BYTES:
             return key
-        if key or time.monotonic() > deadline:
+        if key or age > _PUBLISH_WAIT_SECONDS or time.monotonic() > deadline:
             raise CredentialKeyError(
                 f"{path} is not a {_KEY_BYTES}-byte key; remove it to create"
                 " a new one, which changes every label from here on")

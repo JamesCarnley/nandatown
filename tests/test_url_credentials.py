@@ -517,8 +517,9 @@ def test_a_read_only_home_does_not_stop_a_run(tmp_path, town_home):
     run_path_test("http://127.0.0.1:9", str(tmp_path / "first"))
     town_home.chmod(0o500)
     try:
-        bundle, _ = run_path_test(f"http://{USER}:{SECRET}@127.0.0.1:9",
-                                  str(tmp_path / "runs"))
+        with pytest.warns(RuntimeWarning, match="cannot be used"):
+            bundle, _ = run_path_test(f"http://{USER}:{SECRET}@127.0.0.1:9",
+                                      str(tmp_path / "runs"))
     finally:
         town_home.chmod(0o700)
 
@@ -531,11 +532,28 @@ def test_a_corrupt_key_withholds_credentials_rather_than_fail(
     town_home.mkdir(parents=True)
     (town_home / KEY_FILENAME).write_bytes(b"short")
 
-    bundle, _ = run_path_test(f"http://{USER}:{SECRET}@127.0.0.1:9",
-                              str(tmp_path / "runs"))
+    with pytest.warns(RuntimeWarning, match="cannot be used"):
+        bundle, _ = run_path_test(f"http://{USER}:{SECRET}@127.0.0.1:9",
+                                  str(tmp_path / "runs"))
 
     assert files_containing(bundle, SECRET) == []
     assert WITHHELD in load_bundle(bundle)["run"].config["subject"]
+
+
+def test_an_abandoned_key_claim_is_reported_at_once(town_home):
+    """An empty key file is a claim another process is still publishing,
+    unless it is older than publishing takes."""
+    town_home.mkdir(parents=True)
+    claim = town_home / KEY_FILENAME
+    claim.touch()
+    long_ago = time.time() - 60
+    os.utime(claim, (long_ago, long_ago))
+
+    started = time.monotonic()
+    with pytest.raises(CredentialKeyError):
+        local_key(str(town_home))
+
+    assert time.monotonic() - started < 1
 
 
 def test_a_url_with_leading_whitespace_does_not_leak(tmp_path, capsys):
@@ -816,7 +834,8 @@ def test_pulse_history_is_readable_from_a_home_that_cannot_hold_a_key(
     town_home.mkdir(parents=True)
     town_home.chmod(0o500)
     try:
-        report = render_pulse_report(db)
+        with pytest.warns(RuntimeWarning, match="cannot be used"):
+            report = render_pulse_report(db)
     finally:
         town_home.chmod(0o700)
 
