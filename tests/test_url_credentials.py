@@ -862,6 +862,10 @@ def test_pulse_never_keeps_a_password_with_quotes_brackets_or_spaces(
     f"http://{USER}:p=w0rd@127.0.0.1:9",   # no name, and "=" in the password
     f"http://{USER}:2024/w0rd@127.0.0.1:9",  # no name, and read as a path
     f"http://{USER}:Hash#w0rd@127.0.0.1:9",  # no name, and unparseable
+    f"{USER}:w0rd@127.0.0.1:9",              # no name and no scheme
+    f"http:/{USER}:w0rd@127.0.0.1:9",        # no name, scheme mistyped
+    f"svc=http:{USER}:w0rd@127.0.0.1:9",     # a name, scheme mistyped
+    f"{USER}:Hash=w0rd@127.0.0.1:9",         # split inside the password
 ])
 def test_a_malformed_pulse_target_is_not_echoed_with_its_credentials(
         tmp_path, capsys, target):
@@ -891,6 +895,27 @@ def test_pulse_history_is_readable_from_a_home_that_cannot_hold_a_key(
         town_home.chmod(0o700)
 
     assert SECRET not in report
+
+
+def test_a_duplicate_pulse_target_name_is_refused_without_repeating_it(
+        tmp_path, capsys):
+    """A "name" can be part of a password split at its "="."""
+    target = "Hash=w0rd@127.0.0.1:9"
+    assert main(["pulse", "--target", f"{target}", "--target", f"{target}",
+                 "--count", "1", "--db", str(tmp_path / "p.db")]) == 2
+
+    out = capsys.readouterr().out
+    assert "Hash" not in out and "w0rd" not in out, out
+
+
+def test_pulse_points_out_an_at_sign_after_a_targets_host(
+        tmp_path, capsys, auth_server):
+    assert main(["pulse", "--target",
+                 f"svc=http://{auth_server}/users/a@b", "--count", "1",
+                 "--interval", "0", "--db", str(tmp_path / "p.db")]) == 0
+
+    out = capsys.readouterr().out
+    assert "percent-encode" in out and "a@b" not in out
 
 
 def test_an_unusable_pulse_target_is_refused_without_its_credentials(

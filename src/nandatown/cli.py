@@ -126,14 +126,15 @@ def cmd_test_agent(args: argparse.Namespace) -> int:
         if args.index and not args.agent_name:
             print("--index needs --agent-name to choose the index entry")
             return 2
-        from .url_credentials import Labeller, at_after_host
+        from .url_credentials import (
+            AT_AFTER_HOST_NOTE,
+            Labeller,
+            at_after_host,
+        )
 
         if at_after_host(args.url):
-            print("note: this URL has an '@' after its host. If part of it is"
-                  " a password or token, percent-encode any '/', '?' or '#'"
-                  " in it (as %2F, %3F, %23): unencoded, httpx reads them as"
-                  " the end of the host, and what follows is sent and"
-                  " recorded as written.")
+            print("note: this URL has an '@' after its host."
+                  f" {AT_AFTER_HOST_NOTE}")
         # Printed as it is recorded: credentials in the URL are labelled.
         subject = Labeller().label(args.url) if args.url else args.agent_name
         print(f"nandatown {__version__}: path test of {subject} under"
@@ -387,33 +388,45 @@ def cmd_pulse(args: argparse.Namespace) -> int:
     if args.count < 1:
         print("--count must be at least 1")
         return 2
-    from .url_credentials import safe_message, withhold
+    from .url_credentials import AT_AFTER_HOST_NOTE, at_after_host
 
     targets = {}
     for target in args.target:
         name, _, url = target.partition("=")
-        if "://" in name and "@" in target:
-            # No name before the URL: it was left out, mistyped as "name:",
-            # or the password holds the "=" the target was split at. Any "@"
-            # may end a password, parsed as credentials or not, and echoing
-            # either half could repeat part of it.
-            print("a --target must look like name=url; this one is a URL"
-                  " with no name, not repeated because it may hold"
-                  " credentials")
-            return 2
-        if not url:
-            print(f"target {target!r} must look like name=url")
+        # Any "@" may end a password, parsed as credentials or not, and a
+        # target can be split or mistyped anywhere: the name may be part of
+        # the URL, as when the password holds the "=" it was split at. So
+        # a refusal of such a target repeats none of it.
+        private = "@" in target
+        withheld = "not repeated because it may hold credentials"
+        if not url or ("://" in name and private):
+            if private:
+                print("a --target must look like name=url; this one does"
+                      f" not, and is {withheld}")
+            else:
+                print(f"target {target!r} must look like name=url")
             return 2
         if name in targets:
-            print(f"target name {name!r} is given more than once; give"
-                  " each --target a distinct name")
+            if private:
+                print(f"two --target values have the same name, {withheld};"
+                      " give each a distinct name")
+            else:
+                print(f"target name {name!r} is given more than once; give"
+                      " each --target a distinct name")
             return 2
         problem = unprobeable(url)
         if problem is not None:
-            print(f"target {name!r} has an unusable URL {withhold(url)!r}:"
-                  f" {safe_message(url, problem)}")
+            if private:
+                print(f"a --target has an unusable URL, {withheld}; check"
+                      " its scheme, host and port")
+            else:
+                print(f"target {name!r} has an unusable URL {url!r}:"
+                      f" {problem}")
             return 2
         targets[name] = url
+    if any(at_after_host(url) for url in targets.values()):
+        print("note: a --target URL has an '@' after its host."
+              f" {AT_AFTER_HOST_NOTE}")
     if not targets:
         print("give at least one --target name=url, or --report /"
               " --records over an existing --db")

@@ -114,6 +114,12 @@ def withhold(url: str) -> str:
     return f"{prefix}{WITHHELD}{rest}"
 
 
+AT_AFTER_HOST_NOTE = (
+    "If part of it is a password or token, percent-encode any '/', '?' or"
+    " '#' in it (as %2F, %3F, %23): unencoded, httpx reads them as the end"
+    " of the host, and what follows is sent and recorded as written.")
+
+
 def at_after_host(url: object) -> bool:
     """Whether url has an "@" after the end of its authority.
 
