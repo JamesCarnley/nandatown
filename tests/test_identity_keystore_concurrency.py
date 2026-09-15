@@ -279,10 +279,20 @@ def test_a_private_key_a_dead_writer_left_staged_is_removed(tmp_path):
     keystore = Keystore(str(keystore_dir))
     leftover = keystore_dir / f".nandatown-staged-{'0' * 32}.tmp"
     leftover.write_text(Ed25519PrivateKey.generate().private_bytes_raw().hex())
+    long_ago = time.time() - 3600
+    os.utime(leftover, (long_ago, long_ago))
+    in_flight = keystore_dir / f".nandatown-staged-{'1' * 32}.tmp"
+    in_flight.write_text("another writer's, still being published")
+    named_like_it = keystore_dir / f".nandatown-staged-{'2' * 32}.tmp"
+    named_like_it.mkdir()
+    os.utime(named_like_it, (long_ago, long_ago))
 
     keystore.new_identity("seller")
 
     assert not leftover.exists()
+    assert in_flight.exists() and named_like_it.is_dir()
+    in_flight.unlink()
+    named_like_it.rmdir()
     assert not [p for p in keystore_dir.iterdir()
                 if p.name.startswith(".nandatown-staged-")]
 
@@ -436,52 +446,115 @@ def without_locks_or_hard_links(monkeypatch):
     def no_lock(fd, operation):
         raise OSError(errno.ENOLCK, "No locks available")
 
+    monkeypatch.setattr(fcntl, "flock", no_lock)
+    without_hard_links(monkeypatch)
+
+
+def without_hard_links(monkeypatch):
     def no_links(src, dst):
         raise OSError(errno.EPERM, "Operation not permitted")
 
-    monkeypatch.setattr(fcntl, "flock", no_lock)
     monkeypatch.setattr(os, "link", no_links)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="flock")
-def test_without_a_lock_or_hard_links_a_key_put_down_first_is_kept(
-        tmp_path, monkeypatch):
-    """Without the lock, no writer can assume the directory is its own, so
-    none replaces a key: one that arrives first is the one kept."""
+@pytest.mark.parametrize("locked", [True, False], ids=["locked", "no-lock"])
+def test_without_hard_links_a_key_arriving_before_publication_is_kept(
+        tmp_path, monkeypatch, recwarn, locked):
+    """Another writer's key lands after this one found none, at the last
+    moment before this one puts its own in place."""
     keystore_dir = tmp_path / "identity"
     keystore = Keystore(str(keystore_dir))
-    without_locks_or_hard_links(monkeypatch)
-    first = writer_arrives_first(monkeypatch, keystore_dir, "seller")
+    if locked:
+        without_hard_links(monkeypatch)
+    else:
+        without_locks_or_hard_links(monkeypatch)
+    rival = Ed25519PrivateKey.generate()
+    key_path = keystore_dir / "seller.controller.key"
+    claim = identity_portable._claim
 
-    with pytest.warns(RuntimeWarning, match="never replaced"):
-        identity = keystore.new_identity("seller")
+    def rival_first(path):
+        if path == str(key_path):
+            key_path.write_text(rival.private_bytes_raw().hex() + "\n")
+        return claim(path)
 
-    assert identity["controller_public"] == first
-    assert key_public(keystore_dir, "seller") == first
+    monkeypatch.setattr(identity_portable, "_claim", rival_first)
+
+    identity = keystore.new_identity("seller")
+
+    rival_public = rival.public_key().public_bytes_raw().hex()
+    assert identity["controller_public"] == rival_public
+    assert key_public(keystore_dir, "seller") == rival_public
 
 
 @pytest.mark.skipif(os.name != "posix", reason="flock")
-def test_without_a_lock_a_key_still_being_written_is_waited_for(
-        tmp_path, monkeypatch):
+def test_a_writer_without_the_lock_waits_for_one_that_has_it(tmp_path,
+                                                             monkeypatch):
+    """Where only some writers can lock, one that can is putting its key
+    over its claim when one that cannot arrives. The second must not
+    replace the key, and signs with the first's."""
+    keystore_dir = tmp_path / "identity"
+    locked = Keystore(str(keystore_dir))
+    without_hard_links(monkeypatch)
+    replace = identity_portable._replace
+    arrived, errors, threads = [], [], []
+
+    def publish_without_the_lock():
+        try:
+            arrived.append(Keystore(str(keystore_dir))._publish_key("seller"))
+        except Exception as exc:  # reported below, not lost in the thread
+            errors.append(exc)
+
+    def arrive_during_publication(staged, path):
+        if path.endswith("seller.controller.key") and not threads:
+            threads.append(threading.Thread(target=publish_without_the_lock))
+            threads[0].start()
+            time.sleep(0.2)
+        return replace(staged, path)
+
+    monkeypatch.setattr(identity_portable, "_replace",
+                        arrive_during_publication)
+
+    first = locked.new_identity("seller")
+    threads[0].join()
+
+    assert errors == []
+    assert arrived == [first]
+    assert key_public(keystore_dir, "seller") == first["controller_public"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="flock")
+@pytest.mark.parametrize("locked", [True, False], ids=["locked", "no-lock"])
+def test_a_claimed_key_is_waited_for_until_it_is_written(
+        tmp_path, monkeypatch, recwarn, locked):
     keystore_dir = tmp_path / "identity"
     keystore = Keystore(str(keystore_dir))
-    without_locks_or_hard_links(monkeypatch)
+    if not locked:
+        without_locks_or_hard_links(monkeypatch)
     key = Ed25519PrivateKey.generate()
-    text = key.private_bytes_raw().hex() + "\n"
     key_path = keystore_dir / "seller.controller.key"
-    key_path.write_text(text[:10])
+    key_path.touch()
 
     def finish():
         time.sleep(0.3)
-        key_path.write_text(text)
+        key_path.write_text(key.private_bytes_raw().hex() + "\n")
 
     writer = threading.Thread(target=finish)
     writer.start()
     try:
-        with pytest.warns(RuntimeWarning):
-            identity = keystore.new_identity("seller")
+        identity = keystore.new_identity("seller")
     finally:
         writer.join()
 
     assert identity["controller_public"] \
         == key.public_key().public_bytes_raw().hex()
+
+
+def test_an_abandoned_claim_says_how_to_recover(tmp_path, monkeypatch):
+    monkeypatch.setattr(identity_portable, "_KEY_WAIT_SECONDS", 0.2)
+    keystore_dir = tmp_path / "identity"
+    keystore = Keystore(str(keystore_dir))
+    (keystore_dir / "seller.controller.key").touch()
+
+    with pytest.raises(IdentityError, match="delete the file"):
+        keystore.new_identity("seller")
