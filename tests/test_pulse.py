@@ -264,3 +264,83 @@ def test_probing_an_unusable_url_is_down_not_an_exception(url):
     assert result["ok"] is False
     assert result["status"] == 0
     assert result["error"] == "unprobeable URL"
+
+
+class RedirectHandler(http.server.BaseHTTPRequestHandler):
+    location = ""
+
+    def do_GET(self):
+        self.send_response(302)
+        self.send_header("Location", self.location)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def start_redirect_server(location):
+    handler = type("Handler", (RedirectHandler,), {"location": location})
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_port}/"
+
+
+# httpx prepares the next request for any redirect, even one it will not
+# follow, and reading the host of these Locations raises while it does.
+MALFORMED_LOCATIONS = [
+    pytest.param("http://xn--a.localhost:9/", id="undecodable-a-label"),
+    pytest.param("http://xn--.localhost:9/", id="empty-a-label"),
+    pytest.param("//xn--a.localhost/", id="scheme-relative"),
+]
+
+
+@pytest.mark.parametrize("location", MALFORMED_LOCATIONS)
+def test_a_malformed_redirect_is_the_answer_the_server_gave(location):
+    """The server answered; only the address it pointed at is unusable.
+
+    Pulse does not follow redirects, so a 302 with a well-formed Location
+    is recorded as the 302 it is. A malformed one is still that answer, not
+    a server that is down and not a crash.
+    """
+    server, url = start_redirect_server(location)
+    try:
+        result = probe(url)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result["status"] == 302
+    assert result["ok"] is True
+    assert result["error"] == "unusable redirect location"
+
+
+@pytest.mark.parametrize("location", MALFORMED_LOCATIONS)
+def test_one_malformed_redirect_does_not_end_the_schedule(tmp_path,
+                                                          location):
+    redirect, bad_url = start_redirect_server(location)
+    good, good_url, hits = start_counting_server()
+    db = str(tmp_path / "pulse.db")
+    try:
+        run_pulse({"good": good_url, "redirect": bad_url}, count=3,
+                  interval=0, db_path=db)
+    finally:
+        for server in (redirect, good):
+            server.shutdown()
+            server.server_close()
+
+    measured = availability(db)
+    assert measured["good"]["checks"] == 3
+    assert measured["redirect"]["checks"] == 3
+    assert len(hits) == 3
+
+
+def test_a_well_formed_redirect_is_unchanged():
+    server, url = start_redirect_server("http://127.0.0.1:9/elsewhere")
+    try:
+        result = probe(url)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert (result["ok"], result["status"]) == (True, 302)
+    assert "error" not in result
