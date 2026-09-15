@@ -188,8 +188,8 @@ def load_bundle(directory: str) -> dict[str, Any]:
 # Every evaluator version main has recorded in bundles, per bundle mode.
 # Source: `git log -p -G'EVALUATOR_VERSION *=' -- src/` and the
 # quote-intent return in path_runner.path_evaluator_version, checked
-# against each first-parent commit of main: Track evaluator.py (d32d3e1;
-# 0.3.0 and 0.4.0 in #264 and #279); Lab sim/validators.py (cb19e0e,
+# against each first-parent commit of main: Track evaluator.py (d32d3e1,
+# which reached main in 6adfd18; 0.3.0 and 0.4.0 in #264 and #279); Lab sim/validators.py (cb19e0e,
 # 7af8084, d26ca5a, f4e85d7, 9f2e361, 6a697f2, de57461); Path
 # path_runner.py (5aab66a, 64ecb5f, 2209bbf, d55b7e3). Add a version here
 # when it merges.

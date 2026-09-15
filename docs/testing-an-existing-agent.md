@@ -133,8 +133,8 @@ badge; the signature proves key commitment, not agent safety or independent agre
 `receipt` and `verify-receipt --bundle` refuse a bundle that fails `verify`.
 A bundle is replayed under the evaluator version it recorded whenever this Town
 still has that version, as it does for each Path profile from `path-0.2`; one
-whose recorded result no longer matches that replay, such as a few early Track
-`0.2.0` bundles, is refused. One exception to refusal: a bundle naming a version this project shipped but this
+whose recorded result no longer matches that replay, such as a Track `0.2.0`
+bundle recorded before `6e7529b`, is refused. One exception to refusal: a bundle naming a version this project shipped but this
 Town can no longer replay, such as `path-0.1`, is accepted, and the receipt
 states `evaluator replay not checked` among its signed limitations, so the
 disclosure travels with the receipt. A bundle naming an unrecognised evaluator

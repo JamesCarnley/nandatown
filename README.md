@@ -224,7 +224,8 @@ a new version. Builds before `6e7529b` (24 August 2026) worded the
 2026) recorded a stage lacking evidence after a failed stage as
 `not_enough_evidence`, where `0.2.0` now records it `not_tested` because it was
 not reached. The first affects every bundle from those builds, the second only
-failing runs. The verdict replays unchanged, but `verify` compares the whole
+failing runs where such a stage followed the failure. The verdict replays
+unchanged, but `verify` compares the whole
 recorded result, so it reports an evaluator replay mismatch for such bundles,
 and `receipt` refuses them.
 

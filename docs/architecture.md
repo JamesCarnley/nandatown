@@ -95,9 +95,9 @@ Replay is only as exact as the version label. Two early commits changed what
 Track `0.2.0` records without a new version: `6e7529b` reworded the
 `portable_identity` note, and `f46edce` began recording a stage that lacks
 evidence after a failed stage as `not_tested`, not reached, instead of
-`not_enough_evidence`. Every bundle from before the first, and failing runs from
-before the second, report an evaluator replay mismatch although the verdict
-still agrees. Any change to what an evaluator records needs a new version, and
+`not_enough_evidence`. Every bundle from before the first, and each failing run
+from before the second in which such a stage followed the failure, report an
+evaluator replay mismatch although the verdict still agrees. Any change to what an evaluator records needs a new version, and
 each version's rules are kept, by that version, for as long as its bundles
 should replay.
 
