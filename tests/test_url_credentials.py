@@ -700,6 +700,26 @@ def test_reports_withhold_credentials_a_run_config_recorded_anywhere(
     assert "Verdict:" in report
 
 
+def test_reports_withhold_an_old_track_password_holding_a_space(old_bundle):
+    """Before Track quoted its rerun command, a password with a space was
+    recorded whole in the harness and split across two words of the rerun,
+    and a stage note could quote the endpoint."""
+    bundle = load_bundle(str(old_bundle))
+    url = "http://trk:Spaced Out@127.0.0.1:8940"
+    bundle["run"] = bundle["run"].model_copy(update={"config": dict(
+        bundle["run"].config, harnesses={"seller": f"a2a:{url}"},
+        rerun_command=f"nandatown run quote-clean --agent seller=a2a:{url}")})
+    stages = list(bundle["result"].stages)
+    stages[0] = stages[0].model_copy(
+        update={"note": f"A2A endpoint {url} refused the connection"})
+    bundle["result"] = bundle["result"].model_copy(update={"stages": stages})
+
+    report = render_report(bundle)
+
+    assert "Spaced" not in report and "Out@" not in report
+    assert "refused the connection" in report
+
+
 def test_reports_of_old_evidence_withhold_its_credentials(old_bundle):
     report = render_report(load_bundle(str(old_bundle)))
 
