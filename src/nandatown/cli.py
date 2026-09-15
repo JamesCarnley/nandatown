@@ -447,9 +447,10 @@ def cmd_receipt(args: argparse.Namespace) -> int:
         print(f"receipt refused: {exc}")
         return 1
     print(f"receipt written to {path}")
-    print("sanitized and signed: the claim, digests, observer, window,"
-          " coverage, and limitations; nothing private leaves the"
-          " bundle")
+    print("signed: the claim, digests, observer, window, coverage and"
+          " limitations. Credentials in the subject URL are withheld, but"
+          " the rest of the claim and any custom limitations are copied as"
+          " recorded: review them before sharing")
     if disclosure:
         print(disclosure)
     return 0

@@ -10,6 +10,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import socket
 import stat
 import subprocess
@@ -24,6 +25,8 @@ from nandatown.a2a_adapter import build_agent_card
 from nandatown.bundle import load_bundle, verify_bundle
 from nandatown.cli import main
 from nandatown.path_runner import run_path_test
+from nandatown.receipt import make_receipt, verify_receipt
+from nandatown.report import render_report
 from nandatown.url_credentials import (
     KEY_FILENAME,
     WITHHELD,
@@ -256,6 +259,14 @@ def test_credentials_reach_the_endpoint_and_nothing_records_them(
     assert "url" in run.config["rerun_required_inputs"]
     assert verify_bundle(bundle) == []
 
+    assert main(["receipt", bundle]) == 0
+    receipt_out = capsys.readouterr().out
+    assert "nothing private leaves the bundle" not in receipt_out
+    receipt = json.loads((Path(bundle) / "receipt.json").read_text())
+    assert receipt["payload"]["claim"]["subject"] == (
+        f"http://{WITHHELD}@{auth_agent}")
+    assert SECRET not in json.dumps(receipt)
+    assert verify_receipt(str(Path(bundle) / "receipt.json"), bundle) == []
 
 
 def test_the_url_without_its_credentials_is_a_different_endpoint(
@@ -415,5 +426,44 @@ def test_a_run_without_credentials_never_creates_the_key(tmp_path, town_home):
     run_path_test("http://127.0.0.1:9", str(tmp_path / "runs"))
 
     assert not (town_home / KEY_FILENAME).exists()
+
+
+# ---- evidence recorded before credentials were withheld --------------------
+
+@pytest.fixture
+def old_bundle(tmp_path):
+    directory = tmp_path / "old-bundle"
+    shutil.copytree(OLD_BUNDLE, directory)
+    return directory
+
+
+def test_a_new_receipt_over_old_evidence_withholds_its_credentials(
+        old_bundle):
+    before = {p.name: p.read_bytes() for p in old_bundle.iterdir()}
+
+    path = make_receipt(str(old_bundle))
+
+    receipt = json.loads(Path(path).read_text())
+    assert OLD_SECRET not in json.dumps(receipt)
+    assert WITHHELD in receipt["payload"]["claim"]["subject"]
+    assert verify_receipt(path, str(old_bundle)) == []
+    # The evidence itself is not rewritten.
+    assert {p.name: p.read_bytes() for p in old_bundle.iterdir()
+            if p.name != "receipt.json"} == before
+    assert verify_bundle(str(old_bundle)) == []
+
+
+def test_a_receipt_issued_before_this_still_verifies(old_bundle, tmp_path):
+    receipt = tmp_path / "old-receipt.json"
+    shutil.copy(OLD_RECEIPT, receipt)
+
+    assert verify_receipt(str(receipt), str(old_bundle)) == []
+
+
+def test_reports_of_old_evidence_withhold_its_credentials(old_bundle):
+    report = render_report(load_bundle(str(old_bundle)))
+
+    assert OLD_SECRET not in report
+    assert WITHHELD in report
 
 

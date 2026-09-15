@@ -9,6 +9,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from .url_credentials import Labeller, Scrubber
+
 STATUS_LABEL = {
     "passed": "Passed",
     "failed": "Failed",
@@ -154,4 +156,29 @@ def render_report(bundle: dict[str, Any]) -> str:
     add(SCOPE_SENTENCE)
     add("One run is one scoped observation, not a certificate.")
     add("Improve: fix what failed and rerun the same profile.")
-    return "\n".join(lines) + "\n"
+    return _withhold_recorded_credentials(bundle, "\n".join(lines) + "\n")
+
+
+def _withhold_recorded_credentials(bundle: dict[str, Any], text: str) -> str:
+    """A report of evidence recorded before credentials were labelled.
+
+    Such a bundle can still carry them in its subject, its rerun command
+    or a failure note quoting the endpoint. A report is display, not
+    evidence, so it withholds them without touching the bundle. The
+    credentials to withhold are the ones in the locators the run recorded,
+    found the way httpx finds them; a label Town recorded is shown as
+    recorded, and nothing else in the report is searched.
+    """
+    scrubber = Scrubber(Labeller(withhold_only=True))
+    scrubber.register(bundle["run"].config.get("subject"))
+    for event in bundle.get("events") or []:
+        if event.kind in ("resolution_hop", "resolution_failed",
+                          "card_retrieved", "card_fetch_failed"):
+            scrubber.register(event.subject)
+            scrubber.register(event.detail.get("url"))
+    for intent in bundle.get("intents") or []:
+        payload = intent.payload if hasattr(intent, "payload") else intent.get(
+            "payload", {})
+        if isinstance(payload, dict):
+            scrubber.register(payload.get("url"))
+    return scrubber(text) if scrubber else text
