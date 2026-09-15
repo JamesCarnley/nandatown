@@ -194,8 +194,12 @@ The Track evaluator is `0.5.0`. Under `quote-duplicate-delivery` it recognises
 the injected duplicate only from an acknowledgement of that delivery, which the
 town names by recording the offer's fence; a seller that lost its lease also
 acknowledges the redelivery as a duplicate, but that earlier acknowledgement
-does not count, and the run waits for the offer to be acknowledged. It reads an
-acknowledgement flag only when it
+does not count, and the run waits for the offer to be acknowledged. Only the
+buyer's terminal acknowledgement of the response, any status but `retryable`,
+decides `correct`: a provisional assertion made with `retryable` neither
+outweighs it nor stands in for it, so a buyer that only ever asserted
+provisionally, or settled without asserting, leaves `correct` inconclusive.
+It reads an acknowledgement flag only when it
 is a JSON boolean: `applied`, `correct` and `duplicate` given as a string, a
 number or anything else state nothing about the work, so the stage they belong
 to is inconclusive rather than passed. The fault stages read `tool_errors` and

@@ -38,13 +38,15 @@ CORRELATION_EVALUATOR_VERSION = "0.3.0"
 # and judged only the first accepted request. 0.4.0 reads a flag only when
 # it is a boolean ("boolean_flags") and judges every accepted request
 # ("every_request"). 0.5.0 recognises the injected duplicate only from an
-# acknowledgement of that delivery, bound by its fence ("bound_duplicate").
+# acknowledgement of that delivery, bound by its fence ("bound_duplicate"),
+# and lets only the buyer's terminal acknowledgement, any status but
+# retryable, decide `correct` ("terminal_verdict").
 EVALUATOR_RULES: dict[str, frozenset[str]] = {
     LEGACY_EVALUATOR_VERSION: frozenset(),
     CORRELATION_EVALUATOR_VERSION: frozenset({"correlation"}),
     "0.4.0": frozenset({"correlation", "boolean_flags", "every_request"}),
     "0.5.0": frozenset({"correlation", "boolean_flags", "every_request",
-                        "bound_duplicate"}),
+                        "bound_duplicate", "terminal_verdict"}),
 }
 EVALUATOR_VERSIONS = tuple(EVALUATOR_RULES)
 assert EVALUATOR_VERSION in EVALUATOR_RULES
@@ -366,6 +368,21 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
         buyer_acks = [a for r in accepted_resp
                       for a in find("ack_recorded", observer=buyer,
                                     subject=r.subject)]
+    provisional_assertions: list[TownEvent] = []
+    terminal_verdict = "terminal_verdict" in rules
+    if terminal_verdict:
+        # A retryable acknowledgement hands the response back to the
+        # buyer's inbox: the buyer has not settled, and what it asserted
+        # then is provisional. Only an acknowledgement that settles the
+        # response, the same line the runner draws, says what the buyer
+        # concluded. Earlier rules took the first assertion of any kind,
+        # so a provisional "correct" outweighed a terminal "wrong".
+        provisional_assertions = [
+            a for a in buyer_acks if a.detail.get("status") == "retryable"
+            and isinstance(a.detail.get("note"), dict)
+            and "correct" in a.detail["note"]]
+        buyer_acks = [a for a in buyer_acks
+                      if a.detail.get("status") != "retryable"]
     if strict_flags:
         verdict_acks = [a for a in buyer_acks
                         if isinstance(a.detail.get("note"), dict)
@@ -382,11 +399,21 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
         verdict_acks = [a for a in verdict_acks
                         if _asserted(a.detail.get("note"), "correct")
                         is not None]
+    conflicting = (terminal_verdict and mismatch is None
+                   and len({_asserted(a.detail["note"], "correct")
+                            for a in verdict_acks}) > 1)
     if not verdict_acks and unreadable_verdicts:
         stages.append(_missing(
             "correct",
             _flag_note(unreadable_verdicts, "correct",
                        "the buyer's acknowledgement")))
+    elif conflicting:
+        # The coordinator settles a response at its first terminal
+        # acknowledgement, so only a crafted record carries two that
+        # disagree. Picking one would be choosing the answer.
+        stages.append(_missing(
+            "correct", "the buyer's terminal acknowledgements disagree about"
+                       " whether the total is correct"))
     elif verdict_acks and mismatch is not None and mismatch[0] == "failed":
         stages.append(_failed(
             "correct", [a.event_id for a in verdict_acks],
@@ -406,6 +433,16 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                 "correct", [verdict_acks[0].event_id],
                 f"buyer observed total {note.get('total_cents')} against"
                 f" expected {profile.task.expected_total_cents}"))
+    elif provisional_assertions and buyer_acks:
+        stages.append(_missing(
+            "correct", "the buyer's terminal acknowledgement asserts nothing"
+                       " about correctness; its earlier provisional assertion"
+                       " does not decide"))
+    elif provisional_assertions:
+        stages.append(_missing(
+            "correct", "the buyer's only correctness assertion was"
+                       " provisional (acknowledged retryable), and it never"
+                       " settled the response"))
     else:
         stages.append(_missing("correct", "the buyer made no correctness"
                                           " assertion"))
