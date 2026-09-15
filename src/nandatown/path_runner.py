@@ -547,8 +547,11 @@ def run_path_test(subject_url: str | None, out_dir: str,
                         if not strict_semantics and not isinstance(
                                 exc, json.JSONDecodeError):
                             raise
-                        preview = (text[:200] if isinstance(text, str)
-                                   else repr(text)[:200])
+                        # Withheld before the preview is cut: a cut can
+                        # leave credentials without the "@" that ends them.
+                        shown = scrub(text, recorder.scrubber)
+                        preview = (shown[:200] if isinstance(shown, str)
+                                   else repr(shown)[:200])
                         recorder.emit("town-requester",
                                       "fulfillment_unparseable", order_id,
                                       {"attempt": attempt,

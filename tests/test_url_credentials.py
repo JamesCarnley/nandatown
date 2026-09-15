@@ -26,7 +26,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from nandatown.a2a_adapter import build_agent_card
+from nandatown.a2a_adapter import build_agent_card, probe_endpoint
 from nandatown.bundle import load_bundle, verify_bundle
 from nandatown.replay import render_replay
 from nandatown.cli import main
@@ -74,13 +74,13 @@ def free_port():
 
 
 @contextlib.contextmanager
-def running_auth_agent(password=SECRET):
+def running_auth_agent(password=SECRET, advertise=False):
     """A real localhost A2A agent that answers only alice:<password>."""
     port = free_port()
     root = Path(__file__).resolve().parents[1]
     process = subprocess.Popen(
         [sys.executable, str(FIXTURES / "basic_auth_a2a_agent.py"),
-         str(port), USER, password],
+         str(port), USER, password, *(["advertise"] if advertise else [])],
         env=dict(os.environ, PYTHONPATH=str(root / "src")),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     base = f"127.0.0.1:{port}"
@@ -627,6 +627,75 @@ def test_an_ambiguous_at_sign_is_pointed_out(tmp_path, capsys):
         "--out", str(tmp_path / "runs")])
 
     assert "percent-encode" in out
+
+
+def test_a2a_test_withholds_credentials_a_card_repeats(capsys):
+    """A card may name the URL it was reached at, credentials and all."""
+    with running_auth_agent(advertise=True) as base:
+        url = f"http://{USER}:{SECRET}@{base}"
+        assert httpx.get(f"{url}/.well-known/agent-card.json",
+                         trust_env=False).json()["url"] == url
+
+        assert main(["a2a", "test", url]) == 0
+
+    out = capsys.readouterr().out
+    assert SECRET not in out
+    assert f"http://{WITHHELD}@{base}" in out
+
+
+def test_an_a2a_artifact_preview_cannot_cut_credentials_short():
+    url = f"http://{USER}:{SECRET}@127.0.0.1:9"
+    # The preview keeps 200 characters: the password, and not its "@".
+    artifact = "x" * (200 - len(f"http://{USER}:{SECRET}")) + url
+
+    def handle(request):
+        if request.method == "GET":
+            return httpx.Response(200, json=build_agent_card(url))
+        envelope = json.loads(request.content)
+        return httpx.Response(200, json={
+            "jsonrpc": "2.0", "id": envelope["id"], "result": {
+                "id": "t1", "kind": "task", "status": {"state": "completed"},
+                "artifacts": [{"artifactId": "a", "parts": [
+                    {"kind": "text", "text": artifact}]}]}})
+
+    scrubber = Scrubber(Labeller(withhold_only=True))
+    scrubber.register(url)
+    with httpx.Client(base_url=url,
+                      transport=httpx.MockTransport(handle)) as http:
+        report = probe_endpoint(url, http=http, redact=scrubber)
+
+    assert artifact[:200].endswith(SECRET)
+    assert SECRET not in report["artifact"]
+    assert "http://<credentials" in report["artifact"]
+
+
+def test_a_fulfillment_preview_cannot_cut_credentials_short(tmp_path):
+    """An unparseable fulfillment is recorded as a 200-character preview.
+    Cut after the password and before its "@", the credentials no longer
+    look like credentials, so they are withheld before the cut."""
+    url = f"http://{USER}:{SECRET}@127.0.0.1:9"
+    text = "x" * (200 - len(f"http://{USER}:{SECRET}")) + url + " and more"
+
+    def handle(request):
+        if request.method == "GET":
+            return httpx.Response(200,
+                                  json=build_agent_card("http://127.0.0.1:9"))
+        envelope = json.loads(request.content)
+        return httpx.Response(200, json={
+            "jsonrpc": "2.0", "id": envelope["id"], "result": {
+                "id": "t1", "kind": "task", "status": {"state": "completed"},
+                "artifacts": [{"artifactId": "a", "parts": [
+                    {"kind": "text", "text": text}]}]}})
+
+    with httpx.Client(base_url=url,
+                      transport=httpx.MockTransport(handle)) as http:
+        bundle, _ = run_path_test(url, str(tmp_path / "runs"), http=http)
+
+    assert text[:200].endswith(SECRET)
+    previews = [e.detail["text"] for e in load_bundle(bundle)["events"]
+                if e.kind == "fulfillment_unparseable"]
+    assert previews and all(len(p) <= 200 for p in previews)
+    assert files_containing(bundle, SECRET) == []
 
 
 def test_an_operators_user_name_in_agent_text_is_left_alone(tmp_path):

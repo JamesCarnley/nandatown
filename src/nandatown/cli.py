@@ -733,16 +733,24 @@ def cmd_a2a(args: argparse.Namespace) -> int:
 
         from .url_credentials import (
             AT_AFTER_HOST_NOTE,
+            Labeller,
+            Scrubber,
             at_after_host,
             safe_message,
+            scrub,
         )
 
         if at_after_host(args.url):
             print("note: this URL has an '@' after its host."
                   f" {AT_AFTER_HOST_NOTE}")
-        report = probe_endpoint(args.url)
+        # The agent's card and artifact can repeat the URL it was reached
+        # at, credentials included, so the whole report withholds them.
+        scrubber = Scrubber(Labeller(withhold_only=True))
+        scrubber.register(args.url)
+        report = probe_endpoint(args.url, redact=scrubber)
         report["problems"] = [safe_message(args.url, problem)
                               for problem in report["problems"]]
+        report = scrub(report, scrubber)
         print(json.dumps(report, indent=2))
         if report["ok"]:
             print("A2A edge passed: agent card valid, message/send"
