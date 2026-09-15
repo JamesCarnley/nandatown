@@ -751,7 +751,8 @@ def nested(depth, leaf):
 def test_a2a_test_withholds_before_cutting_its_artifact_preview(capsys,
                                                                 shape):
     """The artifact preview keeps 200 characters: here, the password and
-    not its "@"."""
+    not its "@". The text case guards withholding before the cut; the
+    list and object cases guard shapes that are not text."""
     def artifact(base):
         url = f"http://{USER}:{SECRET}@{base}"
         return shape("x" * (200 - len(f"http://{USER}:{SECRET}")) + url)
@@ -790,6 +791,9 @@ def test_credentials_are_withheld_with_or_without_an_empty_password():
     scrubber = Scrubber(LABEL)
     scrubber.register("http://a:b:@h")
     assert scrubber("http://a:b@h") == "http://a:b@h"
+    scrubber = Scrubber(LABEL)
+    scrubber.register("http://alice%3A@h")  # the user "alice:", no password
+    assert scrubber("http://alice@h") == "http://alice@h"
 
 
 def test_an_operators_user_name_in_agent_text_is_left_alone(tmp_path):

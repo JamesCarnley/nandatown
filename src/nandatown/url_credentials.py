@@ -351,15 +351,17 @@ class Scrubber:
             return
         prefix, userinfo, _rest = _split(url)
         label = self.labeller.label_for(url)
-        spellings = {userinfo, unquote(userinfo)}
+        encoded = {userinfo}
         scheme = _SCHEME.search(prefix)
         parsed = _parses(url[scheme.start():].strip())
         if parsed is not None:
-            spellings.add(parsed.userinfo.decode("ascii", "replace"))
-        # httpx sends "tok" and "tok:" as the same credentials.
-        spellings |= {s + ":" for s in spellings if ":" not in s}
-        spellings |= {s[:-1] for s in spellings
-                      if s.endswith(":") and s.count(":") == 1}
+            encoded.add(parsed.userinfo.decode("ascii", "replace"))
+        # httpx sends "tok" and "tok:" as the same credentials. Only where
+        # a ":" is the separator: decoded, "alice%3A" is a user "alice:".
+        encoded |= {s + ":" for s in encoded if ":" not in s}
+        encoded |= {s[:-1] for s in encoded
+                    if s.endswith(":") and s.count(":") == 1}
+        spellings = encoded | {unquote(userinfo)}
         # shlex.quote writes a quote inside single quotes as '"'"'.
         spellings |= {s.replace("'", "'\"'\"'") for s in spellings if "'" in s}
         for spelling in spellings:
