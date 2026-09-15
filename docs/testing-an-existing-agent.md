@@ -104,6 +104,11 @@ quotes, brackets or spaces. Two kinds of secret can go unrecognised:
 - **A secret anywhere else,** such as a token in a query string or a header,
   which is used, printed and recorded as written.
 
+An agent card that repeats the URL with its credentials is shown and recorded
+with them withheld, but its recorded digest covers the card as served, so a
+weak password could be guessed offline from a bundle. Don't let a card
+advertise credentials.
+
 Labels belong to one Town home:
 Pulse history read from another home labels its older entries afresh. A Town
 from before this change reports a new receipt's withheld subject as not matching
