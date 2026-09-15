@@ -23,16 +23,28 @@ from .records import (
 )
 
 EVALUATOR_VERSION = "0.4.0"
-# Recorded bundles replay under the rules that produced them. 0.2.0 took
-# the first accepted quote response; it neither counted responses nor
-# checked which request a response named. 0.3.0 added those checks but
-# read any truthy acknowledgement flag as a yes, and judged only the
-# first accepted request.
 LEGACY_EVALUATOR_VERSION = "0.2.0"
 CORRELATION_EVALUATOR_VERSION = "0.3.0"
-EVALUATOR_VERSIONS = (LEGACY_EVALUATOR_VERSION,
-                      CORRELATION_EVALUATOR_VERSION,
-                      EVALUATOR_VERSION)
+# The rules each Track evaluator version applies. A recorded bundle replays
+# under the rules of the version it recorded, looked up here by that
+# version, so releasing a new version adds a row and changes no earlier
+# one. Deciding them by comparison with EVALUATOR_VERSION instead would
+# quietly hand every older bundle the previous rules the moment the
+# current version moved on.
+#
+# 0.2.0 took the first accepted quote response; it neither counted
+# responses nor checked which request a response named. 0.3.0 added those
+# checks ("correlation") but read any truthy acknowledgement flag as a yes
+# and judged only the first accepted request. 0.4.0 reads a flag only when
+# it is a boolean ("boolean_flags") and judges every accepted request
+# ("every_request").
+EVALUATOR_RULES: dict[str, frozenset[str]] = {
+    LEGACY_EVALUATOR_VERSION: frozenset(),
+    CORRELATION_EVALUATOR_VERSION: frozenset({"correlation"}),
+    "0.4.0": frozenset({"correlation", "boolean_flags", "every_request"}),
+}
+EVALUATOR_VERSIONS = tuple(EVALUATOR_RULES)
+assert EVALUATOR_VERSION in EVALUATOR_RULES
 
 REQUEST_KIND = "quote_request"
 RESPONSE_KIND = "quote_response"
@@ -225,14 +237,15 @@ def _show_digest(digest: object) -> tuple[str, str]:
 
 def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
              version: str = EVALUATOR_VERSION) -> EvidenceResult:
-    if version not in EVALUATOR_VERSIONS:
+    if version not in EVALUATOR_RULES:
         raise ValueError(f"unsupported Track evaluator version {version!r}")
-    # Only the current rules require a flag to be a boolean. Earlier ones
-    # read truthiness, and a bundle they recorded still replays that way.
-    strict_flags = version == EVALUATOR_VERSION
-    # Earlier rules judged only the first accepted request, so a second one
-    # that nobody answered did not affect the verdict.
-    judges_every_request = version == EVALUATOR_VERSION
+    rules = EVALUATOR_RULES[version]
+    # Rules without "boolean_flags" read truthiness, and a bundle they
+    # recorded still replays that way.
+    strict_flags = "boolean_flags" in rules
+    # Rules without "every_request" judged only the first accepted request,
+    # so a second one that nobody answered did not affect the verdict.
+    judges_every_request = "every_request" in rules
     seller = next((n for n, r in profile.roles.items() if r == "seller"), "seller")
     buyer = next((n for n, r in profile.roles.items() if r == "buyer"), "buyer")
 
@@ -322,7 +335,7 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
     response_id = accepted_resp[0].subject if accepted_resp else None
     buyer_claims = (find("message_claimed", subject=response_id,
                          claimant=buyer) if response_id else [])
-    mismatch = (None if version == LEGACY_EVALUATOR_VERSION
+    mismatch = (None if "correlation" not in rules
                 else _response_mismatch(accepted_resp, accepted_req,
                                         name_first=judges_every_request))
     if mismatch is not None and mismatch[0] == "failed":
