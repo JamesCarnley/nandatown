@@ -77,13 +77,22 @@ records none of it: output, evidence and Pulse history show the URL with its
 credentials as `<credentials 1a2b3c4d>`, a digest keyed by a secret in your
 Town home, so two sets of credentials for one host stay distinguishable without
 revealing either. Receipts show `<credentials withheld>`, and so does anything
-recorded while that key cannot be read or created. The recorded rerun asks for
-the URL again, because the credentials were never written down. Credentials are
-found where httpx finds them, so a password may contain quotes, brackets or
-spaces; one containing `#`, `/` or `?` makes the URL unusable, and it is still
-not shown. Only credentials in the URL's user information are recognised, not a
-token in a query string or header. Labels belong to one Town home: Pulse history
-read from another home labels its older entries afresh. Evidence recorded by an earlier Town still holds
+recorded while that key cannot be read or created; Town warns when that
+happens, and what it recorded meanwhile stays withheld. The recorded rerun asks
+for the URL again, because the credentials were never written down.
+
+Credentials are found where httpx finds them: everything before the last `@`
+that comes before the first `/`, `?` or `#`. A password may contain quotes,
+brackets or spaces. Percent-encode a `/`, `?` or `#` inside one (as `%2F`, `%3F`,
+`%23`). Unencoded, httpx reads it as the end of the host, so the URL goes to a
+different host with no credentials and is recorded as written; Town cannot tell
+that from an ordinary `@` in a path, and prints a note when it sees one. A URL
+httpx cannot parse at all is not shown. Only credentials in the URL's user
+information are recognised, not a token in a query string or header. Labels
+belong to one Town home: Pulse history read from another home labels its older
+entries afresh. A Town from before this change reports a new receipt's withheld
+subject as not matching its bundle when checked with `--bundle`; checked without
+it, the receipt verifies. Evidence recorded by an earlier Town still holds
 credentials on disk: reports and new receipts withhold them, but the bundle
 itself is left as recorded, so rerun rather than share it.
 
