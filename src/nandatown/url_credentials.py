@@ -31,6 +31,8 @@ import os
 import re
 import secrets
 import tempfile
+import time
+import warnings
 from typing import Any, Callable
 from urllib.parse import unquote
 
@@ -39,7 +41,9 @@ import httpx
 WITHHELD = "<credentials withheld>"
 KEY_FILENAME = "url-credentials.key"
 _KEY_BYTES = 32
-_SCHEME = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
+# A scheme may follow other text: leading whitespace, a harness prefix such
+# as "a2a:", or a mistyped "name:" where "name=" was meant.
+_SCHEME = re.compile(r"(?i)(?<![a-z0-9+.\-])[a-z][a-z0-9+.\-]*://")
 _LABEL_USERINFO = re.compile(r"^<credentials (?:[0-9a-f]{8}|withheld)>$")
 
 
@@ -74,14 +78,14 @@ def _split(url: object) -> tuple[str, str, str] | None:
     """
     if not isinstance(url, str):
         return None
-    scheme = _SCHEME.match(url)
+    scheme = _SCHEME.search(url)
     if scheme is None:
         return None
-    prefix = scheme.group(0)
-    remainder = url[len(prefix):]
+    prefix = url[:scheme.end()]
+    remainder = url[scheme.end():]
     ends = [i for i in (remainder.find(c) for c in "/?#") if i >= 0]
     at = remainder[:min(ends, default=len(remainder))].rfind("@")
-    parsed = _parses(url)
+    parsed = _parses(url[scheme.start():].strip())
     if parsed is not None:
         if at < 0 or not (parsed.username or parsed.password):
             return None  # httpx sends no credentials for this URL
@@ -110,6 +114,25 @@ def withhold(url: str) -> str:
     return f"{prefix}{WITHHELD}{rest}"
 
 
+def at_after_host(url: object) -> bool:
+    """Whether url has an "@" that httpx does not read as credentials.
+
+    httpx ends a URL's authority at the first "/", "?" or "#". A password
+    holding one of those, written unencoded, therefore turns into a host,
+    a path and an "@" that ends nothing, and Town, which finds credentials
+    where httpx does, cannot tell that from an ordinary "@" in a path such
+    as "/users/a@b". Callers can warn without repeating the URL.
+    """
+    if not isinstance(url, str) or has_credentials(url):
+        return False
+    scheme = _SCHEME.search(url)
+    if scheme is None or _parses(url[scheme.start():].strip()) is None:
+        return False
+    remainder = url[scheme.end():]
+    ends = [i for i in (remainder.find(c) for c in "/?#") if i >= 0]
+    return bool(ends) and "@" in remainder[min(ends):]
+
+
 def safe_message(url: object, message: str) -> str:
     """message, safe to print beside a URL that may carry credentials.
 
@@ -120,7 +143,8 @@ def safe_message(url: object, message: str) -> str:
     """
     if not has_credentials(url):
         return message
-    if _parses(url) is None:
+    scheme = _SCHEME.search(url)
+    if _parses(url[scheme.start():].strip()) is None:
         return "the URL cannot be parsed; its credentials are not shown"
     scrubber = Scrubber(Labeller(withhold_only=True))
     scrubber.register(url)
@@ -145,44 +169,67 @@ def local_key(home: str | None = None) -> bytes:
         # writes every byte or raises.
         with os.fdopen(fd, "wb") as f:
             f.write(secrets.token_bytes(_KEY_BYTES))
+            f.flush()
+            os.fsync(f.fileno())
         try:
+            # Publishes the complete file or nothing, and never overwrites.
             os.link(staged, path)
         except FileExistsError:
             pass
         except OSError:
-            # A file system without hard links: fall back to an exclusive
-            # create, which still lets only one process write the key.
-            _exclusive_copy(staged, path)
+            _publish_without_links(staged, path)
     finally:
-        os.unlink(staged)
+        try:
+            os.unlink(staged)
+        except FileNotFoundError:
+            pass
     key = _read_key(path)
     if key is None:
         raise CredentialKeyError(f"{path} could not be created")
     return key
 
 
-def _exclusive_copy(source: str, path: str) -> None:
-    with open(source, "rb") as f:
-        data = f.read()
+def _publish_without_links(staged: str, path: str) -> None:
+    """Publish a complete key where hard links are not supported.
+
+    An exclusive create claims the path, so only one process publishes,
+    and the complete key then replaces that empty claim in one step, so no
+    reader ever sees part of a key. A reader that finds the claim empty
+    waits for the replacement.
+    """
     try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        claim = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         return
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
+    os.close(claim)
+    os.replace(staged, path)
+
+
+_PUBLISH_WAIT_SECONDS = 5.0
 
 
 def _read_key(path: str) -> bytes | None:
-    try:
-        with open(path, "rb") as f:
-            key = f.read()
-    except FileNotFoundError:
-        return None
-    if len(key) != _KEY_BYTES:
-        raise CredentialKeyError(
-            f"{path} is not a {_KEY_BYTES}-byte key; remove it to create a"
-            " new one, which changes every label from here on")
-    return key
+    """The key at path; None if there is none yet.
+
+    A key is only ever published whole, so an empty file is another
+    process's claim on the path, still being published, and is waited for.
+    Any other length is a damaged key, and saying so at once is better
+    than labelling with it.
+    """
+    deadline = time.monotonic() + _PUBLISH_WAIT_SECONDS
+    while True:
+        try:
+            with open(path, "rb") as f:
+                key = f.read()
+        except FileNotFoundError:
+            return None
+        if len(key) == _KEY_BYTES:
+            return key
+        if key or time.monotonic() > deadline:
+            raise CredentialKeyError(
+                f"{path} is not a {_KEY_BYTES}-byte key; remove it to create"
+                " a new one, which changes every label from here on")
+        time.sleep(0.02)
 
 
 class Labeller:
@@ -208,8 +255,15 @@ class Labeller:
                 self._key = local_key()
             elif callable(self._key):
                 self._key = self._key()
-        except (OSError, CredentialKeyError):
+        except (OSError, CredentialKeyError) as exc:
             self._failed = True
+            # Withholding keeps the credentials out of the record, but it
+            # also stops two sets of them for one host being told apart,
+            # and what is recorded meanwhile stays withheld: say so.
+            warnings.warn(
+                "URL credentials are recorded as <credentials withheld>:"
+                f" the labelling key cannot be used ({exc})",
+                RuntimeWarning, stacklevel=3)
             return None
         return self._key
 
@@ -221,7 +275,8 @@ class Labeller:
         userinfo = split[1]
         if _LABEL_USERINFO.match(userinfo):
             return userinfo
-        parsed = _parses(url)
+        scheme = _SCHEME.search(split[0])
+        parsed = _parses(url[scheme.start():].strip())
         if parsed is not None:
             # What httpx sends: "tok@h" and "tok:@h" are the same credentials.
             credentials = f"{parsed.username}\x00{parsed.password}"
@@ -250,9 +305,11 @@ class Scrubber:
 
     Only the exact credentials a registered URL carries are replaced, in
     every spelling they can take: as the operator wrote them, as httpx
-    normalises them, and percent-decoded. Each replacement keeps the "@"
-    that ends user information, so text that merely shares a word with a
-    password is left alone, while a URL quoted in an error message is not.
+    normalises them, percent-decoded, and as shell quoting spells a quote
+    inside them in a recorded command. A replacement needs the "://" and
+    the "@" around them, as in a URL, so an agent's "contact admin@host"
+    is left alone even when "admin" is the operator's user name, while a
+    URL quoted in an error message or a rerun command is not.
     """
 
     def __init__(self, label: Labeller | None = None):
@@ -262,15 +319,19 @@ class Scrubber:
     def register(self, url: object) -> None:
         if not has_credentials(url):
             return
-        _prefix, userinfo, _rest = _split(url)
+        prefix, userinfo, _rest = _split(url)
         label = self.labeller.label_for(url)
         spellings = {userinfo, unquote(userinfo)}
-        parsed = _parses(url)
+        scheme = _SCHEME.search(prefix)
+        parsed = _parses(url[scheme.start():].strip())
         if parsed is not None:
             spellings.add(parsed.userinfo.decode("ascii", "replace"))
+        # shlex.quote writes a quote inside single quotes as '"'"'.
+        spellings |= {s.replace("'", "'\"'\"'") for s in spellings if "'" in s}
         for spelling in spellings:
-            if spelling and (f"{spelling}@", f"{label}@") not in self._pairs:
-                self._pairs.append((f"{spelling}@", f"{label}@"))
+            pair = (f"://{spelling}@", f"://{label}@")
+            if spelling and pair not in self._pairs:
+                self._pairs.append(pair)
         self._pairs.sort(key=lambda pair: len(pair[0]), reverse=True)
 
     def __call__(self, text: str) -> str:

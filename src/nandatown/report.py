@@ -7,6 +7,7 @@ stage by stage, and never claims more than the bundle holds.
 from __future__ import annotations
 
 import time
+import shlex
 from typing import Any
 
 from .url_credentials import Labeller, Scrubber
@@ -159,6 +160,17 @@ def render_report(bundle: dict[str, Any]) -> str:
     return _withhold_recorded_credentials(bundle, "\n".join(lines) + "\n")
 
 
+def _strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
 def _withhold_recorded_credentials(bundle: dict[str, Any], text: str) -> str:
     """A report of evidence recorded before credentials were labelled.
 
@@ -170,7 +182,18 @@ def _withhold_recorded_credentials(bundle: dict[str, Any], text: str) -> str:
     recorded, and nothing else in the report is searched.
     """
     scrubber = Scrubber(Labeller(withhold_only=True))
-    scrubber.register(bundle["run"].config.get("subject"))
+    # Everything the run's configuration recorded: the subject, a Track
+    # harness such as "a2a:http://user:secret@host", and each word of the
+    # rerun command, where shell quoting may have respelled a password.
+    for recorded in _strings(bundle["run"].config):
+        scrubber.register(recorded)
+        if any(ch.isspace() for ch in recorded):
+            try:
+                words = shlex.split(recorded)
+            except ValueError:
+                words = recorded.split()
+            for word in words:
+                scrubber.register(word)
     for event in bundle.get("events") or []:
         if event.kind in ("resolution_hop", "resolution_failed",
                           "card_retrieved", "card_fetch_failed"):

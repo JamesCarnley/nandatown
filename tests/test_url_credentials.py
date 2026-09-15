@@ -12,6 +12,7 @@ import http.server
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -43,6 +44,7 @@ from nandatown.url_credentials import (
     CredentialKeyError,
     Labeller,
     Scrubber,
+    at_after_host,
     has_credentials,
     local_key,
     safe_message,
@@ -200,12 +202,14 @@ def test_registering_a_locator_without_credentials_never_loads_the_key():
     assert scrubber("anything at all") == "anything at all"
 
 
-def test_a_key_that_cannot_be_used_withholds_rather_than_fails():
+def test_a_key_that_cannot_be_used_withholds_and_says_so():
     def unwritable():
         raise PermissionError("read-only home")
 
-    assert Labeller(unwritable).label("http://alice:pw@h") == (
-        f"http://{WITHHELD}@h")
+    with pytest.warns(RuntimeWarning, match="withheld"):
+        labelled = Labeller(unwritable).label("http://alice:pw@h")
+
+    assert labelled == f"http://{WITHHELD}@h"
 
 
 def test_a_message_that_could_quote_a_password_is_not_repeated():
@@ -214,6 +218,68 @@ def test_a_message_that_could_quote_a_password_is_not_repeated():
     assert "Hash" not in safe_message(unparseable, "Invalid port: 'Hash'")
     assert safe_message("http://127.0.0.1:9", "Invalid port: 'x'") == (
         "Invalid port: 'x'")
+
+
+@pytest.mark.parametrize("text, host_part", [
+    (" http://alice:LeadPw1@127.0.0.1:9", "@127.0.0.1:9"),
+    ("\thttp://alice:LeadPw1@127.0.0.1:9", "@127.0.0.1:9"),
+    ("a2a:http://trk:TrackPw@127.0.0.1:9", "@127.0.0.1:9"),
+    ("svc:http://alice:TypoPw@127.0.0.1:9", "@127.0.0.1:9"),
+])
+def test_credentials_after_leading_text_are_still_found(text, host_part):
+    assert has_credentials(text)
+    assert withhold(text).endswith(f"{WITHHELD}{host_part}")
+    assert "Pw" not in LABEL.label(text)
+
+
+def test_an_agents_email_is_not_the_operators_user_name():
+    """A user name alone is often a plain word; only a URL spells it."""
+    scrubber = Scrubber(LABEL)
+    scrubber.register("http://admin@127.0.0.1:9")
+
+    assert scrubber("contact admin@example.com") == "contact admin@example.com"
+    assert scrubber("task id admin@task") == "task id admin@task"
+    assert "admin@" not in scrubber("'http://admin@127.0.0.1:9/x'")
+
+
+def test_a_shell_quoted_password_is_found_in_a_recorded_command():
+    url = "http://alice:Old'Pw@127.0.0.1:9"
+    scrubber = Scrubber(LABEL)
+    scrubber.register(url)
+
+    command = shlex.join(["nandatown", "test-agent", "--url", url])
+
+    assert "Old" not in scrubber(command)
+
+
+def test_an_at_sign_httpx_reads_as_path_is_flagged_not_guessed():
+    """Town cannot tell a password with "/" in it from a path with "@"."""
+    ambiguous = "http://alice:2024/Pw1@127.0.0.1:9"
+
+    assert at_after_host(ambiguous)
+    assert at_after_host("http://h/users/a@b")
+    assert not at_after_host("http://alice:pw@127.0.0.1:9/x")
+    assert not at_after_host("http://127.0.0.1:9/x")
+    # Neither form is rewritten: guessing would hide a real host.
+    assert LABEL.label("http://h/users/a@b") == "http://h/users/a@b"
+
+
+def test_concurrent_creators_agree_where_hard_links_are_not_supported(
+        town_home, tmp_path):
+    script = ("import os, sys\n"
+              "def no_links(a, b):\n"
+              "    raise OSError(45, 'Operation not supported')\n"
+              "os.link = no_links\n"
+              "from nandatown.url_credentials import local_key\n"
+              "sys.stdout.write(local_key().hex())\n")
+    processes = [subprocess.Popen([sys.executable, "-c", script],
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=os.environ)
+                 for _ in range(8)]
+    results = [p.communicate(timeout=30) for p in processes]
+
+    assert {out for out, _err in results} == {local_key().hex().encode()}
+    assert all(b"withheld" not in err for _out, err in results)
 
 
 def test_the_key_is_private_and_every_process_agrees_on_it(town_home):
@@ -241,6 +307,46 @@ def test_the_key_is_created_where_hard_links_are_not_supported(
 
     assert len(key) == 32 and local_key() == key
     assert stat.S_IMODE((town_home / KEY_FILENAME).stat().st_mode) == 0o600
+
+
+def test_a_slow_writer_never_shows_another_process_half_a_key(
+        town_home, monkeypatch):
+    """Where hard links are missing, a reader must not catch a key mid-write."""
+    import threading
+    from unittest import mock
+
+    real_fdopen = os.fdopen
+
+    def slow_fdopen(fd, mode="r", *args, **kwargs):
+        handle = real_fdopen(fd, mode, *args, **kwargs)
+        if "w" in mode:
+            write = handle.write
+
+            def slowly(data):
+                written = write(data[:4])
+                handle.flush()
+                time.sleep(0.3)
+                return written + write(data[4:])
+
+            handle.write = slowly
+        return handle
+
+    def no_links(source, destination):
+        raise OSError(18, "Invalid cross-device link")
+
+    labels = []
+    with mock.patch("os.link", no_links), mock.patch("os.fdopen", slow_fdopen):
+        def label_once():
+            labels.append(Labeller().label("http://alice:pw@h"))
+
+        threads = [threading.Thread(target=label_once) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+            time.sleep(0.05)
+        for thread in threads:
+            thread.join()
+
+    assert len(set(labels)) == 1 and WITHHELD not in labels[0], labels
 
 
 def test_a_corrupt_key_is_named_and_never_silently_replaced(town_home):
@@ -432,6 +538,59 @@ def test_a_corrupt_key_withholds_credentials_rather_than_fail(
     assert WITHHELD in load_bundle(bundle)["run"].config["subject"]
 
 
+def test_a_url_with_leading_whitespace_does_not_leak(tmp_path, capsys):
+    url = f" http://{USER}:LeadPw1@127.0.0.1:9"
+
+    code, out, bundle = bundle_of(capsys, [
+        "test-agent", "--url", url, "--out", str(tmp_path / "runs")])
+
+    assert "LeadPw1" not in out
+    assert files_containing(bundle, "LeadPw1") == []
+
+
+def test_an_ambiguous_at_sign_is_pointed_out(tmp_path, capsys):
+    code, out, _bundle = bundle_of(capsys, [
+        "test-agent", "--url", f"http://{USER}:2024/Pw1@127.0.0.1:9",
+        "--out", str(tmp_path / "runs")])
+
+    assert "percent-encode" in out
+
+
+def test_an_operators_user_name_in_agent_text_is_left_alone(tmp_path):
+    name = "contact admin@example.com"
+
+    def handler(request):
+        card = build_agent_card("http://127.0.0.1:9")
+        return httpx.Response(200, json=dict(card, name=name))
+
+    with httpx.Client(base_url="http://admin@127.0.0.1:9",
+                      transport=httpx.MockTransport(handler)) as http:
+        bundle, _ = run_path_test("http://admin@127.0.0.1:9",
+                                  str(tmp_path / "runs"), http=http)
+
+    names = [e.detail.get("name") for e in load_bundle(bundle)["events"]
+             if e.kind == "card_retrieved"]
+    assert names == [name]
+
+
+@pytest.mark.parametrize("argv", [
+    ["run", "quote-clean", "--agent", f"a2a:http://{USER}:{SECRET}@h:9"],
+    ["run", "quote-clean", "--agent", f"seller=A2A:http://{USER}:{SECRET}@h:9"],
+])
+def test_a_mistyped_harness_is_not_echoed_with_its_credentials(
+        tmp_path, capsys, argv):
+    # An unknown harness raises rather than returning a usage error, as it
+    # did before; what matters here is that neither form repeats the secret.
+    try:
+        main(argv + ["--out", str(tmp_path / "runs")])
+        message = ""
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+
+    assert SECRET not in capsys.readouterr().out
+    assert SECRET not in message
+
+
 def test_a_run_without_credentials_never_creates_the_key(tmp_path, town_home):
     run_path_test("http://127.0.0.1:9", str(tmp_path / "runs"))
 
@@ -468,6 +627,27 @@ def test_a_receipt_issued_before_this_still_verifies(old_bundle, tmp_path):
     shutil.copy(OLD_RECEIPT, receipt)
 
     assert verify_receipt(str(receipt), str(old_bundle)) == []
+
+
+def test_reports_withhold_credentials_a_run_config_recorded_anywhere(
+        old_bundle):
+    """Earlier Track runs recorded an a2a: harness URL and a rerun command
+    carrying it; earlier Path reruns shell-quoted a password with a quote."""
+    bundle = load_bundle(str(old_bundle))
+    track_url = "http://trk:TrackLeft-TrackRight@127.0.0.1:8940"
+    quoted_url = "http://alice:OldLeft'OldRight@127.0.0.1:8940"
+    bundle["run"] = bundle["run"].model_copy(update={"config": dict(
+        bundle["run"].config,
+        harnesses={"seller": f"a2a:{track_url}"},
+        rerun_command=shlex.join(["nandatown", "test-agent", "--url",
+                                  quoted_url]) + " --agent seller=a2a:"
+                      + track_url)})
+
+    report = render_report(bundle)
+
+    for fragment in ("TrackLeft", "OldLeft", OLD_SECRET):
+        assert fragment not in report, fragment
+    assert "Verdict:" in report
 
 
 def test_reports_of_old_evidence_withhold_its_credentials(old_bundle):

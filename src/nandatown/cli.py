@@ -47,7 +47,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     for spec in args.agent:
         role, _, connector = spec.partition("=")
         if not connector:
-            print(f"--agent {spec!r} must look like role=harness,"
+            from .url_credentials import withhold
+
+            print(f"--agent {withhold(spec)!r} must look like role=harness,"
                   " e.g. seller=cmd:'python my_agent.py'")
             return 2
         harnesses[role] = connector
@@ -124,8 +126,14 @@ def cmd_test_agent(args: argparse.Namespace) -> int:
         if args.index and not args.agent_name:
             print("--index needs --agent-name to choose the index entry")
             return 2
-        from .url_credentials import Labeller
+        from .url_credentials import Labeller, at_after_host
 
+        if at_after_host(args.url):
+            print("note: this URL has an '@' after its host. If part of it is"
+                  " a password or token, percent-encode any '/', '?' or '#'"
+                  " in it (as %2F, %3F, %23): unencoded, httpx reads them as"
+                  " the end of the host, and the URL is sent and recorded as"
+                  " written.")
         # Printed as it is recorded: credentials in the URL are labelled.
         subject = Labeller().label(args.url) if args.url else args.agent_name
         print(f"nandatown {__version__}: path test of {subject} under"
@@ -383,14 +391,14 @@ def cmd_pulse(args: argparse.Namespace) -> int:
 
     targets = {}
     for target in args.target:
-        if has_credentials(target):
-            # A target that is itself a URL with credentials has no name,
-            # and splitting it at an "=" in its password would echo both
-            # halves of the password back: say what is wrong, not what it is.
+        name, _, url = target.partition("=")
+        if "://" in name and has_credentials(target):
+            # No name before the URL: it was left out, mistyped as "name:",
+            # or the password holds the "=" the target was split at. Echoing
+            # either half would repeat part of the password.
             print("a --target must look like name=url; this one is a URL"
                   " with credentials and no name")
             return 2
-        name, _, url = target.partition("=")
         if not url:
             print(f"target {target!r} must look like name=url")
             return 2
