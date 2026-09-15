@@ -874,6 +874,7 @@ def test_a_malformed_pulse_target_is_not_echoed_with_its_credentials(
 
     out = capsys.readouterr().out
     assert "Hash" not in out and "w0rd" not in out, out
+    assert "--target 1" in out
 
 
 def test_pulse_history_is_readable_from_a_home_that_cannot_hold_a_key(
@@ -900,12 +901,13 @@ def test_pulse_history_is_readable_from_a_home_that_cannot_hold_a_key(
 def test_a_duplicate_pulse_target_name_is_refused_without_repeating_it(
         tmp_path, capsys):
     """A "name" can be part of a password split at its "="."""
-    target = "Hash=w0rd@127.0.0.1:9"
-    assert main(["pulse", "--target", f"{target}", "--target", f"{target}",
+    target = "Hash=http://w0rd@127.0.0.1:9"
+    assert main(["pulse", "--target", target, "--target", target,
                  "--count", "1", "--db", str(tmp_path / "p.db")]) == 2
 
     out = capsys.readouterr().out
     assert "Hash" not in out and "w0rd" not in out, out
+    assert "distinct name" in out and "--target 2" in out
 
 
 def test_pulse_points_out_an_at_sign_after_a_targets_host(

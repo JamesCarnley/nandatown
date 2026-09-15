@@ -391,25 +391,25 @@ def cmd_pulse(args: argparse.Namespace) -> int:
     from .url_credentials import AT_AFTER_HOST_NOTE, at_after_host
 
     targets = {}
-    for target in args.target:
+    for position, target in enumerate(args.target, 1):
         name, _, url = target.partition("=")
         # Any "@" may end a password, parsed as credentials or not, and a
         # target can be split or mistyped anywhere: the name may be part of
         # the URL, as when the password holds the "=" it was split at. So
         # a refusal of such a target repeats none of it.
         private = "@" in target
-        withheld = "not repeated because it may hold credentials"
+        withheld = f"--target {position} is not repeated because it may" \
+            " hold credentials"
         if not url or ("://" in name and private):
             if private:
-                print("a --target must look like name=url; this one does"
-                      f" not, and is {withheld}")
+                print(f"a --target must look like name=url; {withheld}")
             else:
                 print(f"target {target!r} must look like name=url")
             return 2
         if name in targets:
             if private:
-                print(f"two --target values have the same name, {withheld};"
-                      " give each a distinct name")
+                print("each --target needs a distinct name, and an earlier"
+                      f" one has this name; {withheld}")
             else:
                 print(f"target name {name!r} is given more than once; give"
                       " each --target a distinct name")
@@ -417,8 +417,9 @@ def cmd_pulse(args: argparse.Namespace) -> int:
         problem = unprobeable(url)
         if problem is not None:
             if private:
-                print(f"a --target has an unusable URL, {withheld}; check"
-                      " its scheme, host and port")
+                print(f"a --target has an unusable URL; {withheld}. Check"
+                      " its scheme, host and port, and percent-encode any"
+                      " '/', '?' or '#' in a password (as %2F, %3F, %23)")
             else:
                 print(f"target {name!r} has an unusable URL {url!r}:"
                       f" {problem}")
