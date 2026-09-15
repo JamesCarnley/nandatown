@@ -608,12 +608,22 @@ def test_a_password_town_cannot_recognise_is_used_as_written(tmp_path,
 
     assert "cannot recognise the credentials" in out
     assert url not in out.split("note:")[1].splitlines()[0]
-    assert load_bundle(bundle)["run"].config["subject"] == url
+    assert "Unseen1" in out
+    recorded = load_bundle(bundle)
+    assert recorded["run"].config["subject"] == url
+    first = recorded["events"][0]
+    assert (first.kind, first.detail["url"]) == ("resolution_hop", url)
+
+
+def test_a2a_test_points_out_an_at_sign_after_the_host(capsys):
+    main(["a2a", "test", "http://127.0.0.1:9/Unseen2@127.0.0.1:9"])
+
+    assert "cannot recognise the credentials" in capsys.readouterr().out
 
 
 def test_an_ambiguous_at_sign_is_pointed_out(tmp_path, capsys):
     code, out, _bundle = bundle_of(capsys, [
-        "test-agent", "--url", f"http://{USER}:2024/Pw1@127.0.0.1:9",
+        "test-agent", "--url", "http://127.0.0.1:2024/Pw1@127.0.0.1:9",
         "--out", str(tmp_path / "runs")])
 
     assert "percent-encode" in out

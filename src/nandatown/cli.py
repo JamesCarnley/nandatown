@@ -731,8 +731,15 @@ def cmd_a2a(args: argparse.Namespace) -> int:
             return 2
         from .a2a_adapter import probe_endpoint
 
-        from .url_credentials import safe_message
+        from .url_credentials import (
+            AT_AFTER_HOST_NOTE,
+            at_after_host,
+            safe_message,
+        )
 
+        if at_after_host(args.url):
+            print("note: this URL has an '@' after its host."
+                  f" {AT_AFTER_HOST_NOTE}")
         report = probe_endpoint(args.url)
         report["problems"] = [safe_message(args.url, problem)
                               for problem in report["problems"]]

@@ -527,8 +527,8 @@ gains a field. Bundle-aware verification then checks that claims, coverage and t
 agree with the bundle; without `--bundle` it checks only the receipt's shape
 and signature.
 Credentials Town recognises in a subject URL are withheld from the receipt,
-which names the endpoint as `http://<credentials withheld>@host`; a password
-Town cannot recognise, such as one with an unencoded `/`, is copied as part of
+which names the endpoint as `http://<credentials withheld>@host`; a secret
+Town cannot recognise, such as a token in the query string, is copied as part of
 the URL (see [testing an existing agent](docs/testing-an-existing-agent.md)).
 Review the rest of the subject URL, release labels and custom limitations before
 sharing: the receipt is not a universal secret scrubber. A refusal names its reason; the badge is

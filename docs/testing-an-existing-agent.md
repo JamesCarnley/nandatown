@@ -84,20 +84,27 @@ credentials were never written down.
 
 Town recognises credentials only where httpx finds them: everything before the
 last `@` that comes before the first `/`, `?` or `#`. A password may contain
-quotes, brackets or spaces. Anything Town does not recognise is used, printed
-and recorded exactly as written, because it cannot be told apart from the
-endpoint itself:
+quotes, brackets or spaces. Two kinds of secret are not recognised:
 
 - **A `/`, `?` or `#` in a password.** Percent-encode it (as `%2F`, `%3F`,
-  `%23`). Unencoded, httpx reads it as the end of the host, so the URL goes to a
-  different host, with no credentials or only the part of the password before an
-  `@`, and the rest of the password is printed and recorded as part of the URL.
-  Town cannot tell that from an ordinary `@` in a path, such as `/users/a@b`, so
-  it neither refuses nor rewrites such a URL. It prints a note, without the URL,
-  whenever it sees an `@` after the host.
-- **A secret anywhere else,** such as a token in a query string or a header.
+  `%23`). Unencoded, httpx ends the host at that character, and what happens
+  depends on what comes before it:
+  - **It no longer parses,** as in `http://user:pass/word@host`, where `pass`
+    is not a port. Town does not call it, and withholds everything before its
+    last `@` as it would credentials.
+  - **It still reads as a host,** as in `http://user:1234/word@host`,
+    `http://token/word@host` or `http://user:a@b/c@host`. The URL goes to the
+    host before that character (`user`, `token` and `b` in these examples),
+    with no credentials or only the part of the password before an `@`. The rest of the password is used, printed and
+    recorded as part of the URL, exactly as written. Town cannot tell it from an
+    ordinary `@` in a path, such as `/users/a@b`, so it neither refuses nor
+    rewrites the URL. `test-agent --url`, `a2a test` and `pulse` print a note,
+    without the URL, when they see an `@` after the host; a URL read from an
+    `--index` file gets no note.
+- **A secret anywhere else,** such as a token in a query string or a header,
+  which is used, printed and recorded as written.
 
-A URL httpx cannot parse at all is not shown. Labels belong to one Town home:
+Labels belong to one Town home:
 Pulse history read from another home labels its older entries afresh. A Town
 from before this change reports a new receipt's withheld subject as not matching
 its bundle when checked with `--bundle`; checked without it, the receipt

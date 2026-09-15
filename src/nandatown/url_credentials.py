@@ -18,12 +18,15 @@ a label:
 Credentials are found where httpx finds them, in the URL's own authority,
 not by searching text for things that look like URLs. A run registers the
 operator's locator, and only the exact credentials it carries are replaced
-in what the run records, so an agent's own text is never rewritten. Only
-user information is recognised: a secret in a query string or a header is
-not. Nor is a password holding an unencoded "/", "?" or "#", which httpx
-reads as the end of the host: the URL is sent, printed and recorded as
-written, because it cannot be told from an "@" in a path. at_after_host
-lets a caller point that out without repeating the URL.
+in what the run records, so an agent's own text is recorded as it said it;
+a display of old evidence withholds the same credentials wherever they
+appear in a URL. Only user information is recognised: a secret in a query
+string or a header is not. Nor, when the URL still parses, is a password
+holding an unencoded "/", "?" or "#", which httpx reads as the end of the
+host: the rest of it is used, printed and recorded as written, because it
+cannot be told from an "@" in a path. at_after_host lets a caller point
+that out without repeating the URL. A URL that no longer parses is not
+called, and everything before its last "@" is withheld.
 """
 
 from __future__ import annotations
@@ -121,7 +124,7 @@ AT_AFTER_HOST_NOTE = (
     "If part of it is a password or token, percent-encode any '/', '?' or"
     " '#' in it (as %2F, %3F, %23): unencoded, httpx reads them as the end"
     " of the host, Town cannot recognise the credentials, and what follows"
-    " is sent, printed and recorded as written.")
+    " is used, printed and recorded as written.")
 
 
 def at_after_host(url: object) -> bool:
