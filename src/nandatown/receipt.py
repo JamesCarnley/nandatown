@@ -263,12 +263,15 @@ def bundle_receipt_check(bundle_dir: str) -> tuple[list[str], str | None]:
     """Whether a receipt may rest on this bundle.
 
     Returns the bundle's integrity problems, any one of which refuses a
-    receipt, and a disclosure for a bundle recorded by a known earlier
-    evaluator version (bundle.SHIPPED_EVALUATOR_VERSIONS for its mode):
-    its hashes, manifest, bindings and attestation were verified, but its
-    recorded result was not replayed. An unrecognised evaluator version is
-    an integrity problem. The disclosure is command output; the signed
-    receipt does not record it."""
+    receipt, and a disclosure for a bundle this Town cannot replay whose
+    evaluator version this project shipped
+    (bundle.SHIPPED_EVALUATOR_VERSIONS for its mode): its hashes,
+    manifest, bindings and attestation were verified, but its recorded
+    result was not replayed. A bundle whose version this Town can replay
+    gets no disclosure, because it was replayed, and a replay mismatch is
+    an integrity problem. An unrecognised evaluator version is an
+    integrity problem too. make_receipt signs the disclosure into the
+    receipt's limitations."""
     from .bundle import verify_bundle_integrity
 
     problems, differs = verify_bundle_integrity(bundle_dir)

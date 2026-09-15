@@ -215,10 +215,14 @@ without `request_id` is not enough evidence. A `request_id` of `null`, or any
 other non-string, names no valid request and fails `response`. Stage notes show
 at most 80 characters of a recorded value, then its length and fingerprint.
 Resending one identity with identical content is a replay, not a second
-response. Track bundles
-recorded under `0.2.0` replay under their recorded `0.2.0` rules, which took the
-first response without counting or correlating responses; their results are not
-upgraded.
+response. A Track bundle replays under the rules of the evaluator version it
+recorded, and its result is not upgraded: `0.2.0`, for example, took the first
+response without counting or correlating responses. One exception: the first
+two builds to call their evaluator `0.2.0` (`6adfd18` and `7a6a00c`, 24 August
+2026) recorded a `portable_identity` note that a later build reworded without
+changing the version. Their stage statuses and verdict replay unchanged, but
+`verify` compares the whole recorded result, so it reports an evaluator replay
+mismatch for their bundles, and `receipt` refuses them.
 
 Stages are separate claims with separate failure boundaries. An HTTP success is never proof an agent understood or completed a task. Missing evidence stays missing. Every event names its observer; attribution in a local trace is not independent authentication of every asserted fact.
 
@@ -515,12 +519,15 @@ an empty `coverage.not_tested` list. Partial or failed receipts remain valid
 signed evidence; they cannot earn this badge. `receipt` and bundle-aware
 `verify-receipt` first run the `verify` checks and refuse, naming the problem,
 when hashes, the manifest, cross-record bindings, an attestation or evaluator
-replay fail. A bundle recorded by a known earlier evaluator version for its
-mode (one this project shipped) is still accepted when every other check
-passes: its recorded result is not replayed, and the receipt states
-`evaluator replay not checked` among its signed limitations, so a reader
-who has the receipt but not the bundle still sees it. A bundle naming an
-unrecognised evaluator version is refused. The profile binding is checked
+replay fail. A bundle whose recorded evaluator version this Town can still
+replay, which today means every Track version and each Path profile from
+`path-0.2`, is replayed, and the receipt rests on that replay. Where it cannot,
+as for an older Lab evaluator or `path-0.1`, a bundle naming a version this
+project shipped is still accepted when every other check passes: its recorded
+result is not replayed, and the receipt states `evaluator replay not checked`
+among its signed limitations, so a reader who has the receipt but not the
+bundle still sees it. A bundle naming an unrecognised evaluator version is
+refused. The profile binding is checked
 against the profile document the run recorded, not against a fresh
 serialization, so a bundle stays verifiable when the profile model later
 gains a field. Bundle-aware verification then checks that claims, coverage and time window

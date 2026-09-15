@@ -1,0 +1,8 @@
+{
+  "fixture": "track-0.2.0-early/quote-clean",
+  "what": "A Track evidence bundle recorded by one of the first two builds that called their evaluator 0.2.0. A later build reworded one stage note without changing the version, so this bundle's recorded result no longer matches a replay, although every stage status and the verdict do. Tests use it to keep the documentation of historical replay true.",
+  "produced_by": "nandatown at commit 7a6a00c (24 August 2026)",
+  "command": "nandatown run quote-clean",
+  "evaluator_version": "0.2.0",
+  "not": "This is a test fixture. It is not an adoption, an endorsement, or evidence that anyone outside this repository ran Town."
+}
