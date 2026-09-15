@@ -18,6 +18,7 @@ import errno
 import json
 import math
 import os
+import re
 import secrets
 import stat
 import time
@@ -76,16 +77,21 @@ def verify_signature(public_hex: str, payload: Any,
         return False
 
 
-_STAGED_PREFIX = ".staged-"
+# A file Town stages, and nothing else: a controller key is always named
+# "<name>.controller.key", so no identity's key can match.
+_STAGED = re.compile(r"\.nandatown-staged-[0-9a-f]{32}\.tmp")
+# How long a writer without the lock waits for another's key to be complete.
+_KEY_WAIT_SECONDS = 5.0
 
 
 @contextlib.contextmanager
-def _directory_lock(directory: str) -> Iterator[None]:
-    """An exclusive lock on directory, held through its .lock file.
+def _directory_lock(directory: str) -> Iterator[bool]:
+    """An exclusive lock on directory, held through its .lock file; yields
+    whether it was acquired.
 
-    Files are staged in a directory only under its lock, so anything
-    staged that is found on taking the lock was left by a writer that
-    died, and is removed: it can hold a private key.
+    Files are staged in a directory only under its lock, so a staged file
+    found on taking the lock was left by a writer that died, and is
+    removed: it can hold a private key.
     """
     fd = os.open(os.path.join(directory, ".lock"),
                  os.O_RDWR | os.O_CREAT, 0o600)
@@ -103,7 +109,7 @@ def _directory_lock(directory: str) -> Iterator[None]:
                         raise
             try:
                 _remove_staged(directory)
-                yield
+                yield True
             finally:
                 os.lseek(fd, 0, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
@@ -117,20 +123,26 @@ def _directory_lock(directory: str) -> Iterator[None]:
                                      errno.EOPNOTSUPP):
                     raise
                 warnings.warn(
-                    f"{directory} cannot be locked ({exc}): runs that create"
+                    f"{directory} cannot be locked ({exc}): a controller key"
+                    " is still never replaced, but runs that create"
                     " identities in it at the same time can lose each"
                     " other's registry entries",
                     RuntimeWarning, stacklevel=5)
+                yield False
             else:
                 _remove_staged(directory)
-            yield
+                yield True
     finally:
         os.close(fd)
 
 
+def _staged_name() -> str:
+    return f".nandatown-staged-{secrets.token_hex(16)}.tmp"
+
+
 def _remove_staged(directory: str) -> None:
     for entry in os.listdir(directory):
-        if entry.startswith(_STAGED_PREFIX):
+        if _STAGED.fullmatch(entry):
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(os.path.join(directory, entry))
 
@@ -167,9 +179,10 @@ class Keystore:
         self.registry_path = os.path.join(directory, "registry.json")
 
     @contextlib.contextmanager
-    def _locked(self) -> Iterator[None]:
+    def _locked(self) -> Iterator[bool]:
         """Hold the keystore's lock, and the lock of the directory its
-        registry really lives in, if a symlink puts it elsewhere.
+        registry really lives in, if a symlink puts it elsewhere. Yields
+        whether this process holds the keystore's own directory alone.
 
         Directories are told apart and ordered by device and inode, not by
         how a path spells them, so one directory is never locked twice and
@@ -181,10 +194,13 @@ class Keystore:
         registry_dir = os.path.dirname(os.path.realpath(self.registry_path))
         shared = os.stat(registry_dir)
         directories.setdefault((shared.st_dev, shared.st_ino), registry_dir)
+        exclusive = False
         with contextlib.ExitStack() as stack:
             for _identity, directory in sorted(directories.items()):
                 try:
-                    stack.enter_context(_directory_lock(directory))
+                    locked = stack.enter_context(_directory_lock(directory))
+                    if directory is self.directory:
+                        exclusive = locked
                 except PermissionError as exc:
                     if directory is self.directory:
                         raise
@@ -194,12 +210,11 @@ class Keystore:
                         " can lose each other's entries if they create"
                         " identities at the same time",
                         RuntimeWarning, stacklevel=3)
-            yield
+            yield exclusive
 
     def _staged(self, text: str, mode: int, directory: str) -> str:
         """A new file in directory holding text, written whole."""
-        staged = os.path.join(directory,
-                              f"{_STAGED_PREFIX}{secrets.token_hex(8)}")
+        staged = os.path.join(directory, _staged_name())
         fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
         try:
             with os.fdopen(fd, "w") as f:
@@ -277,14 +292,17 @@ class Keystore:
         return True
 
     def new_identity(self, name: str) -> dict[str, Any]:
-        existing = self._identity_from_key(name)
+        try:
+            existing = self._identity_from_key(name)
+        except IdentityError:
+            existing = None  # decided under the lock
         if existing is not None and self._registered(existing,
                                                      self._registry()):
             return existing
-        with self._locked():
-            identity = self._identity_from_key(name)
+        with self._locked() as exclusive:
+            identity = self._complete_identity(name, wait=not exclusive)
             if identity is None:
-                identity = self._publish_key(name)
+                identity = self._publish_key(name, exclusive)
             # A key without its entry, left by a process that stopped
             # between the two writes, is registered here.
             registry = self._registry()
@@ -296,34 +314,68 @@ class Keystore:
                 self._write_registry(registry)
             return identity
 
-    def _publish_key(self, name: str) -> dict[str, Any]:
+    def _complete_identity(self, name: str,
+                           wait: bool) -> dict[str, Any] | None:
+        """The identity of name's key, waiting, if asked, for a key another
+        writer without the lock may still be writing."""
+        deadline = time.monotonic() + (_KEY_WAIT_SECONDS if wait else 0.0)
+        while True:
+            try:
+                return self._identity_from_key(name)
+            except IdentityError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+
+    def _publish_key(self, name: str, exclusive: bool) -> dict[str, Any]:
         """A new controller key for name, or the one another writer won.
 
         The key is written whole under a staging name and then linked into
         place, which fails rather than replace a key already there, even
-        one written by a Town that takes no lock.
+        one written by a Town that takes no lock. Without hard links, a
+        key is replaced into place only by a writer holding the lock, and
+        otherwise created exclusively and written where it lies.
         """
         private = Ed25519PrivateKey.generate()
-        staged = self._staged(private.private_bytes_raw().hex() + "\n",
-                              0o600, self.directory)
+        text = private.private_bytes_raw().hex() + "\n"
         path = self._key_path(name)
+        staged = self._staged(text, 0o600, self.directory)
         try:
             try:
                 os.link(staged, path)
             except FileExistsError:
                 pass
             except OSError:
-                # No hard links here. Under the lock, with no key found,
-                # replacing is safe from every writer that takes the lock.
-                if not os.path.exists(path):
-                    _replace(staged, path)
+                if exclusive:
+                    # Under the lock, with no key found, replacing is safe
+                    # from every writer that takes the lock.
+                    if not os.path.exists(path):
+                        _replace(staged, path)
+                else:
+                    self._create_key(path, text)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(staged)
-        identity = self._identity_from_key(name)
+        identity = self._complete_identity(name, wait=not exclusive)
         if identity is None:
             raise IdentityError(f"no controller key stored for {name!r}")
         return identity
+
+    @staticmethod
+    def _create_key(path: str, text: str) -> None:
+        """Write a key at path only if none is there, never replacing one.
+
+        A reader can find it part written; readers without the lock wait
+        for it to be complete.
+        """
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
 
     def identity(self, name: str) -> dict[str, Any]:
         # A local key decides, provided the registry lists it under this

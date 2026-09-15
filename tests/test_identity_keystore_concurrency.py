@@ -12,6 +12,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from nandatown.identity_portable import (
     IdentityError,
     Keystore,
     resolve_file,
+    verify_signature,
 )
 from nandatown.records import fingerprint
 from nandatown.sim.runner import run_lab
@@ -275,14 +277,41 @@ def test_a_home_without_hard_links_still_creates_identities(tmp_path,
 def test_a_private_key_a_dead_writer_left_staged_is_removed(tmp_path):
     keystore_dir = tmp_path / "identity"
     keystore = Keystore(str(keystore_dir))
-    leftover = keystore_dir / ".staged-0123456789abcdef"
+    leftover = keystore_dir / f".nandatown-staged-{'0' * 32}.tmp"
     leftover.write_text(Ed25519PrivateKey.generate().private_bytes_raw().hex())
 
     keystore.new_identity("seller")
 
     assert not leftover.exists()
     assert not [p for p in keystore_dir.iterdir()
-                if p.name.startswith(".staged-")]
+                if p.name.startswith(".nandatown-staged-")]
+
+
+def test_cleanup_removes_only_what_town_staged(tmp_path):
+    """An identity may be named like a staging file, and a symlinked
+    registry's directory may hold files that are not Town's."""
+    keystore_dir = tmp_path / "identity"
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    (shared_dir / "registry.json").write_text("{}")
+    keystore_dir.mkdir()
+    (keystore_dir / "registry.json").symlink_to(shared_dir / "registry.json")
+    keystore = Keystore(str(keystore_dir))
+    staged_like = keystore.new_identity(".staged-seller")
+    town_like = keystore.new_identity(f".nandatown-staged-{'0' * 32}.tmp")
+    neighbours = [shared_dir / ".staged-notes",
+                  shared_dir / f".nandatown-staged-{'0' * 32}.tmp.bak"]
+    for neighbour in neighbours:
+        neighbour.write_text("not Town's")
+
+    keystore.new_identity("bob")
+
+    for identity in (staged_like, town_like):
+        assert keystore.identity(identity["name"]) == identity
+        assert verify_signature(identity["controller_public"], {"a": 1},
+                                keystore.sign(identity["name"], {"a": 1}))
+    assert all(neighbour.read_text() == "not Town's"
+               for neighbour in neighbours)
 
 
 def test_a_key_the_registry_lists_under_another_name_is_refused(tmp_path):
@@ -399,3 +428,60 @@ def test_a_staged_registry_removed_by_another_process_is_staged_again(
     assert removed
     assert resolve_file(keystore.registry_path, identity["agent_id"]) \
         == identity["controller_public"]
+
+
+def without_locks_or_hard_links(monkeypatch):
+    import fcntl
+
+    def no_lock(fd, operation):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    def no_links(src, dst):
+        raise OSError(errno.EPERM, "Operation not permitted")
+
+    monkeypatch.setattr(fcntl, "flock", no_lock)
+    monkeypatch.setattr(os, "link", no_links)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="flock")
+def test_without_a_lock_or_hard_links_a_key_put_down_first_is_kept(
+        tmp_path, monkeypatch):
+    """Without the lock, no writer can assume the directory is its own, so
+    none replaces a key: one that arrives first is the one kept."""
+    keystore_dir = tmp_path / "identity"
+    keystore = Keystore(str(keystore_dir))
+    without_locks_or_hard_links(monkeypatch)
+    first = writer_arrives_first(monkeypatch, keystore_dir, "seller")
+
+    with pytest.warns(RuntimeWarning, match="never replaced"):
+        identity = keystore.new_identity("seller")
+
+    assert identity["controller_public"] == first
+    assert key_public(keystore_dir, "seller") == first
+
+
+@pytest.mark.skipif(os.name != "posix", reason="flock")
+def test_without_a_lock_a_key_still_being_written_is_waited_for(
+        tmp_path, monkeypatch):
+    keystore_dir = tmp_path / "identity"
+    keystore = Keystore(str(keystore_dir))
+    without_locks_or_hard_links(monkeypatch)
+    key = Ed25519PrivateKey.generate()
+    text = key.private_bytes_raw().hex() + "\n"
+    key_path = keystore_dir / "seller.controller.key"
+    key_path.write_text(text[:10])
+
+    def finish():
+        time.sleep(0.3)
+        key_path.write_text(text)
+
+    writer = threading.Thread(target=finish)
+    writer.start()
+    try:
+        with pytest.warns(RuntimeWarning):
+            identity = keystore.new_identity("seller")
+    finally:
+        writer.join()
+
+    assert identity["controller_public"] \
+        == key.public_key().public_bytes_raw().hex()
