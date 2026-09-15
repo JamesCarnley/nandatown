@@ -171,15 +171,29 @@ class Keystore:
         """Hold the keystore's lock, and the lock of the directory its
         registry really lives in, if a symlink puts it elsewhere.
 
-        Locks are taken in one order, so two keystores sharing a registry
-        cannot wait on each other. The system releases them if we die.
+        Directories are told apart and ordered by device and inode, not by
+        how a path spells them, so one directory is never locked twice and
+        two keystores sharing a registry cannot wait on each other. The
+        system releases the locks if we die.
         """
-        directories = sorted({
-            os.path.realpath(self.directory),
-            os.path.dirname(os.path.realpath(self.registry_path))})
+        own = os.stat(self.directory)
+        directories = {(own.st_dev, own.st_ino): self.directory}
+        registry_dir = os.path.dirname(os.path.realpath(self.registry_path))
+        shared = os.stat(registry_dir)
+        directories.setdefault((shared.st_dev, shared.st_ino), registry_dir)
         with contextlib.ExitStack() as stack:
-            for directory in directories:
-                stack.enter_context(_directory_lock(directory))
+            for _identity, directory in sorted(directories.items()):
+                try:
+                    stack.enter_context(_directory_lock(directory))
+                except PermissionError as exc:
+                    if directory is self.directory:
+                        raise
+                    warnings.warn(
+                        f"the registry's directory {directory} cannot be"
+                        f" locked ({exc}): keystores sharing that registry"
+                        " can lose each other's entries if they create"
+                        " identities at the same time",
+                        RuntimeWarning, stacklevel=3)
             yield
 
     def _staged(self, text: str, mode: int, directory: str) -> str:

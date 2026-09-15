@@ -333,3 +333,46 @@ def test_the_registry_keeps_its_permissions_and_its_link(tmp_path):
     assert (keystore_dir / "registry.json").is_symlink()
     assert identity["agent_id"] in json.loads(shared.read_text())
     assert stat.S_IMODE(shared.stat().st_mode) == 0o600
+
+
+def test_one_directory_spelled_two_ways_is_locked_once(tmp_path):
+    """On a case-insensitive disk "Home" and "home" are one directory, and
+    a path does not show it. Locking it twice would wait forever."""
+    (tmp_path / "home" / "identity").mkdir(parents=True)
+    if not (tmp_path / "HOME").exists():
+        pytest.skip("this filesystem is case-sensitive")
+    real = tmp_path / "home" / "identity" / "real-registry.json"
+    real.write_text("{}")
+    keystore_dir = tmp_path / "Home" / "identity"
+    (keystore_dir / "registry.json").symlink_to(real)
+
+    finished = subprocess.run(
+        [sys.executable, "-c",
+         "from nandatown.identity_portable import Keystore\n"
+         f"Keystore({str(keystore_dir)!r}).new_identity('seller')\n"],
+        capture_output=True, text=True, timeout=30, check=False)
+
+    assert finished.returncode == 0, finished.stderr
+    assert "seller" in real.read_text()
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0,
+                    reason="needs a lock file this user cannot open")
+def test_a_shared_registry_that_cannot_be_locked_still_registers(tmp_path):
+    shared_dir = tmp_path / "shared"
+    shared_dir.mkdir()
+    (shared_dir / "registry.json").write_text("{}")
+    lock = shared_dir / ".lock"
+    lock.touch()
+    lock.chmod(0)
+    keystore_dir = tmp_path / "identity"
+    keystore_dir.mkdir()
+    (keystore_dir / "registry.json").symlink_to(shared_dir / "registry.json")
+    try:
+        with pytest.warns(RuntimeWarning, match="cannot be locked"):
+            identity = Keystore(str(keystore_dir)).new_identity("seller")
+    finally:
+        lock.chmod(0o600)
+
+    assert identity["agent_id"] in json.loads(
+        (shared_dir / "registry.json").read_text())
