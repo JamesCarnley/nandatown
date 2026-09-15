@@ -226,16 +226,25 @@ class Keystore:
         link points.
         """
         target = os.path.realpath(self.registry_path)
-        staged = self._staged(json.dumps(registry, indent=2, sort_keys=True),
-                              0o666, os.path.dirname(target))
-        try:
-            with contextlib.suppress(FileNotFoundError):
-                os.chmod(staged, stat.S_IMODE(os.stat(target).st_mode))
-            _replace(staged, target)
-        except BaseException:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(staged)
-            raise
+        text = json.dumps(registry, indent=2, sort_keys=True)
+        for attempt in range(5):
+            staged = self._staged(text, 0o666, os.path.dirname(target))
+            try:
+                with contextlib.suppress(FileNotFoundError):
+                    mode = stat.S_IMODE(os.stat(target).st_mode)
+                    os.chmod(staged, mode)
+                _replace(staged, target)
+                return
+            except FileNotFoundError:
+                # Where this process could not take a shared registry's
+                # lock, a process that did can remove the staged file as a
+                # leftover. Stage it again.
+                if os.path.exists(staged) or attempt == 4:
+                    raise
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(staged)
+                raise
 
     def _key_path(self, name: str) -> str:
         return os.path.join(self.directory, f"{name}.controller.key")

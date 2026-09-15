@@ -376,3 +376,26 @@ def test_a_shared_registry_that_cannot_be_locked_still_registers(tmp_path):
 
     assert identity["agent_id"] in json.loads(
         (shared_dir / "registry.json").read_text())
+
+
+def test_a_staged_registry_removed_by_another_process_is_staged_again(
+        tmp_path, monkeypatch):
+    """A process that could not lock a shared registry's directory stages
+    there anyway, and one that could may remove that file as a leftover."""
+    keystore = Keystore(str(tmp_path / "identity"))
+    real_replace = identity_portable._replace
+    removed = []
+
+    def removed_first(staged, path):
+        if not removed and path.endswith("registry.json"):
+            removed.append(staged)
+            os.unlink(staged)
+        return real_replace(staged, path)
+
+    monkeypatch.setattr(identity_portable, "_replace", removed_first)
+
+    identity = keystore.new_identity("seller")
+
+    assert removed
+    assert resolve_file(keystore.registry_path, identity["agent_id"]) \
+        == identity["controller_public"]
