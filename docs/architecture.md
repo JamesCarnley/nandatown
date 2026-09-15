@@ -97,9 +97,9 @@ Track `0.2.0` records without a new version: `6e7529b` reworded the
 evidence after a failed stage as `not_tested`, not reached, instead of
 `not_enough_evidence`. Every bundle from before the first, and each failing run
 from before the second in which such a stage followed the failure, report an
-evaluator replay mismatch although the verdict still agrees. Any change to what an evaluator records needs a new version, and
-each version's rules are kept, by that version, for as long as its bundles
-should replay.
+evaluator replay mismatch although the verdict still agrees. Any change to what
+an evaluator records needs a new version, and each version's rules are kept, by
+that version, for as long as its bundles should replay.
 
 The root commits the five named record files only. Reports, receipts,
 attestations, viewer HTML and participant state are side artifacts. A receipt
