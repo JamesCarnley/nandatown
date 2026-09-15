@@ -153,6 +153,28 @@ def test_concurrent_new_identities_all_stay_registered(tmp_path):
             == identity["controller_public"]
 
 
+def test_two_homes_sharing_a_registry_keep_every_entry(tmp_path):
+    """A registry symlinked into another keystore is locked where it lives."""
+    shared_dir = tmp_path / "shared" / "identity"
+    linked_dir = tmp_path / "linked" / "identity"
+    shared_dir.mkdir(parents=True)
+    linked_dir.mkdir(parents=True)
+    (shared_dir / "registry.json").write_text("{}")
+    (linked_dir / "registry.json").symlink_to(shared_dir / "registry.json")
+    work = [(shared_dir, f"shared{i}") for i in range(3)] \
+        + [(linked_dir, f"linked{i}") for i in range(3)]
+
+    outputs = start_together(tmp_path, tmp_path / "home", [
+        "from nandatown.identity_portable import Keystore\n"
+        f"ks = Keystore({str(directory)!r})\n"
+        f"print(json.dumps(ks.new_identity({name!r})))\n"
+        for directory, name in work])
+
+    registry = json.loads((shared_dir / "registry.json").read_text())
+    assert {json.loads(out)["agent_id"] for out in outputs} == set(registry)
+    assert (linked_dir / "registry.json").is_symlink()
+
+
 def test_a_home_the_race_already_damaged_still_attests(tmp_path):
     """Before this fix, a race could leave a registry naming the operator
     twice while the key file held only one of those keys, and not the one

@@ -79,6 +79,62 @@ def verify_signature(public_hex: str, payload: Any,
 _STAGED_PREFIX = ".staged-"
 
 
+@contextlib.contextmanager
+def _directory_lock(directory: str) -> Iterator[None]:
+    """An exclusive lock on directory, held through its .lock file.
+
+    Files are staged in a directory only under its lock, so anything
+    staged that is found on taking the lock was left by a writer that
+    died, and is removed: it can hold a private key.
+    """
+    fd = os.open(os.path.join(directory, ".lock"),
+                 os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                    break
+                except OSError as exc:
+                    # LK_LOCK gives up after ten seconds; keep waiting.
+                    if exc.errno not in (errno.EDEADLK, errno.EACCES):
+                        raise
+            try:
+                _remove_staged(directory)
+                yield
+            finally:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOLCK, errno.ENOTSUP,
+                                     errno.EOPNOTSUPP):
+                    raise
+                warnings.warn(
+                    f"{directory} cannot be locked ({exc}): runs that create"
+                    " identities in it at the same time can lose each"
+                    " other's registry entries",
+                    RuntimeWarning, stacklevel=5)
+            else:
+                _remove_staged(directory)
+            yield
+    finally:
+        os.close(fd)
+
+
+def _remove_staged(directory: str) -> None:
+    for entry in os.listdir(directory):
+        if entry.startswith(_STAGED_PREFIX):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(os.path.join(directory, entry))
+
+
 def _replace(staged: str, path: str) -> None:
     """os.replace, retried while Windows refuses because path is open."""
     deadline = time.monotonic() + 5.0
@@ -112,57 +168,19 @@ class Keystore:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
-        """Hold the keystore's lock; the system releases it if we die.
+        """Hold the keystore's lock, and the lock of the directory its
+        registry really lives in, if a symlink puts it elsewhere.
 
-        Everything staged is staged under this lock, so anything staged
-        that is found on taking it was left by a writer that died, and is
-        removed: it can hold a private key.
+        Locks are taken in one order, so two keystores sharing a registry
+        cannot wait on each other. The system releases them if we die.
         """
-        fd = os.open(os.path.join(self.directory, ".lock"),
-                     os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                while True:
-                    try:
-                        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                        break
-                    except OSError as exc:
-                        # LK_LOCK gives up after ten seconds; keep waiting.
-                        if exc.errno not in (errno.EDEADLK, errno.EACCES):
-                            raise
-                try:
-                    self._remove_staged()
-                    yield
-                finally:
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                except OSError as exc:
-                    if exc.errno not in (errno.ENOLCK, errno.ENOTSUP,
-                                         errno.EOPNOTSUPP):
-                        raise
-                    warnings.warn(
-                        f"{self.directory} cannot be locked ({exc}): runs"
-                        " that create identities in it at the same time can"
-                        " lose each other's registry entries",
-                        RuntimeWarning, stacklevel=4)
-                else:
-                    self._remove_staged()
-                yield
-        finally:
-            os.close(fd)
-
-    def _remove_staged(self) -> None:
-        for entry in os.listdir(self.directory):
-            if entry.startswith(_STAGED_PREFIX):
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(os.path.join(self.directory, entry))
+        directories = sorted({
+            os.path.realpath(self.directory),
+            os.path.dirname(os.path.realpath(self.registry_path))})
+        with contextlib.ExitStack() as stack:
+            for directory in directories:
+                stack.enter_context(_directory_lock(directory))
+            yield
 
     def _staged(self, text: str, mode: int, directory: str) -> str:
         """A new file in directory holding text, written whole."""
