@@ -14,11 +14,14 @@ source of authority becomes portable.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import math
 import os
 import secrets
+import stat
 import time
+import warnings
 from collections.abc import Iterator
 from typing import Any
 
@@ -73,6 +76,22 @@ def verify_signature(public_hex: str, payload: Any,
         return False
 
 
+_STAGED_PREFIX = ".staged-"
+
+
+def _replace(staged: str, path: str) -> None:
+    """os.replace, retried while Windows refuses because path is open."""
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            os.replace(staged, path)
+            return
+        except PermissionError:
+            if os.name != "nt" or time.monotonic() > deadline:
+                raise
+            time.sleep(0.02)
+
+
 def _agent_id(public_hex: str) -> str:
     return "did:town:" + fingerprint(public_hex).removeprefix("sha256:")[:24]
 
@@ -93,7 +112,12 @@ class Keystore:
 
     @contextlib.contextmanager
     def _locked(self) -> Iterator[None]:
-        """Hold the keystore's lock; the system releases it if we die."""
+        """Hold the keystore's lock; the system releases it if we die.
+
+        Everything staged is staged under this lock, so anything staged
+        that is found on taking it was left by a writer that died, and is
+        removed: it can hold a private key.
+        """
         fd = os.open(os.path.join(self.directory, ".lock"),
                      os.O_RDWR | os.O_CREAT, 0o600)
         try:
@@ -104,9 +128,12 @@ class Keystore:
                     try:
                         msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
                         break
-                    except OSError:
-                        continue  # LK_LOCK gives up after ten seconds
+                    except OSError as exc:
+                        # LK_LOCK gives up after ten seconds; keep waiting.
+                        if exc.errno not in (errno.EDEADLK, errno.EACCES):
+                            raise
                 try:
+                    self._remove_staged()
                     yield
                 finally:
                     os.lseek(fd, 0, os.SEEK_SET)
@@ -114,19 +141,33 @@ class Keystore:
             else:
                 import fcntl
 
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                except OSError as exc:
+                    if exc.errno not in (errno.ENOLCK, errno.ENOTSUP,
+                                         errno.EOPNOTSUPP):
+                        raise
+                    warnings.warn(
+                        f"{self.directory} cannot be locked ({exc}): runs"
+                        " that create identities in it at the same time can"
+                        " lose each other's registry entries",
+                        RuntimeWarning, stacklevel=4)
+                else:
+                    self._remove_staged()
                 yield
         finally:
             os.close(fd)
 
-    def _staged(self, text: str, mode: int) -> str:
-        """A new file in the keystore holding text, written whole.
+    def _remove_staged(self) -> None:
+        for entry in os.listdir(self.directory):
+            if entry.startswith(_STAGED_PREFIX):
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(os.path.join(self.directory, entry))
 
-        Created with mode as open() would apply it, under the umask, so a
-        replaced file keeps the permissions it had before.
-        """
-        staged = os.path.join(self.directory,
-                              f".staged-{secrets.token_hex(8)}")
+    def _staged(self, text: str, mode: int, directory: str) -> str:
+        """A new file in directory holding text, written whole."""
+        staged = os.path.join(directory,
+                              f"{_STAGED_PREFIX}{secrets.token_hex(8)}")
         fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
         try:
             with os.fdopen(fd, "w") as f:
@@ -146,11 +187,19 @@ class Keystore:
         return {}
 
     def _write_registry(self, registry: dict[str, Any]) -> None:
-        # Replaced whole, so no reader sees it half written.
+        """Replace the registry whole, so no reader sees it half written.
+
+        The file keeps its permissions, created under the umask as open()
+        would create it, and a symlinked registry is updated where the
+        link points.
+        """
+        target = os.path.realpath(self.registry_path)
         staged = self._staged(json.dumps(registry, indent=2, sort_keys=True),
-                              0o666)
+                              0o666, os.path.dirname(target))
         try:
-            os.replace(staged, self.registry_path)
+            with contextlib.suppress(FileNotFoundError):
+                os.chmod(staged, stat.S_IMODE(os.stat(target).st_mode))
+            _replace(staged, target)
         except BaseException:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(staged)
@@ -164,15 +213,32 @@ class Keystore:
         path = self._key_path(name)
         if not os.path.exists(path):
             return None
-        private = Ed25519PrivateKey.from_private_bytes(
-            bytes.fromhex(self._controller_private(name)))
+        try:
+            private = Ed25519PrivateKey.from_private_bytes(
+                bytes.fromhex(self._controller_private(name)))
+        except ValueError as exc:
+            raise IdentityError(
+                f"{path} does not hold a controller key: {exc}") from exc
         public_hex = private.public_key().public_bytes_raw().hex()
         return {"name": name, "agent_id": _agent_id(public_hex),
                 "controller_public": public_hex}
 
+    def _registered(self, identity: dict[str, Any],
+                    registry: dict[str, Any]) -> bool:
+        """Whether registry lists identity; an error if under another name."""
+        entry = registry.get(identity["agent_id"])
+        if entry is None:
+            return False
+        if entry.get("name") != identity["name"]:
+            raise IdentityError(
+                f"the controller key for {identity['name']!r} is registered"
+                f" as {entry.get('name')!r}")
+        return True
+
     def new_identity(self, name: str) -> dict[str, Any]:
         existing = self._identity_from_key(name)
-        if existing is not None and existing["agent_id"] in self._registry():
+        if existing is not None and self._registered(existing,
+                                                     self._registry()):
             return existing
         with self._locked():
             identity = self._identity_from_key(name)
@@ -181,7 +247,7 @@ class Keystore:
             # A key without its entry, left by a process that stopped
             # between the two writes, is registered here.
             registry = self._registry()
-            if identity["agent_id"] not in registry:
+            if not self._registered(identity, registry):
                 registry[identity["agent_id"]] = {
                     "name": name,
                     "controller_public": identity["controller_public"],
@@ -197,7 +263,8 @@ class Keystore:
         one written by a Town that takes no lock.
         """
         private = Ed25519PrivateKey.generate()
-        staged = self._staged(private.private_bytes_raw().hex() + "\n", 0o600)
+        staged = self._staged(private.private_bytes_raw().hex() + "\n",
+                              0o600, self.directory)
         path = self._key_path(name)
         try:
             try:
@@ -205,10 +272,10 @@ class Keystore:
             except FileExistsError:
                 pass
             except OSError:
-                # No hard links here. Under the lock, and with no key
-                # found, replacing is safe for every writer that locks.
+                # No hard links here. Under the lock, with no key found,
+                # replacing is safe from every writer that takes the lock.
                 if not os.path.exists(path):
-                    os.replace(staged, path)
+                    _replace(staged, path)
         finally:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(staged)
@@ -218,11 +285,16 @@ class Keystore:
         return identity
 
     def identity(self, name: str) -> dict[str, Any]:
-        # A local key decides: a registry can name one agent more than
-        # once, as an earlier race between runs could leave it.
+        # A local key decides, provided the registry lists it under this
+        # name: a registry can name one agent more than once, as an earlier
+        # race between runs could leave it.
         local = self._identity_from_key(name)
         if local is not None:
-            return local
+            if self._registered(local, self._registry()):
+                return local
+            raise IdentityError(
+                f"the controller key for {name!r} is not registered in"
+                f" {self.directory}")
         for agent_id, entry in self._registry().items():
             if entry["name"] == name:
                 return {"name": name, "agent_id": agent_id,

@@ -6,17 +6,26 @@ registry, so a race that only sometimes shows up in practice shows up
 every time here.
 """
 
+import errno
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from nandatown import identity_portable
 from nandatown.bundle import attest_bundle, verify_bundle
-from nandatown.identity_portable import OPERATOR_NAME, Keystore, resolve_file
+from nandatown.identity_portable import (
+    OPERATOR_NAME,
+    IdentityError,
+    Keystore,
+    resolve_file,
+)
 from nandatown.records import fingerprint
 from nandatown.sim.runner import run_lab
 
@@ -42,6 +51,13 @@ def _slow_dump(*args, **kwargs):
     time.sleep(0.1)
     return _dump(*args, **kwargs)
 json.dump = _slow_dump
+
+_read_registry = identity_portable.Keystore._registry
+def _slow_registry(self):
+    registry = _read_registry(self)
+    time.sleep(0.1)
+    return registry
+identity_portable.Keystore._registry = _slow_registry
 
 gate = os.environ["GATE"]
 while not os.path.exists(gate):
@@ -177,3 +193,121 @@ def test_a_key_left_without_its_registry_entry_is_registered(tmp_path):
     assert keystore.new_identity("seller") == identity
     assert resolve_file(keystore.registry_path, identity["agent_id"]) \
         == identity["controller_public"]
+
+
+# ---- one process: what the lock cannot see ----------------------------------
+
+def writer_arrives_first(monkeypatch, keystore_dir, name):
+    """Another writer, one that takes no lock, puts a key down after this
+    process found none and before it publishes its own."""
+    other = Ed25519PrivateKey.generate()
+    real = Ed25519PrivateKey
+
+    class ArrivesDuringGeneration:
+        from_private_bytes = staticmethod(real.from_private_bytes)
+
+        @staticmethod
+        def generate():
+            (Path(keystore_dir) / f"{name}.controller.key").write_text(
+                other.private_bytes_raw().hex() + "\n")
+            return real.generate()
+
+    monkeypatch.setattr(identity_portable, "Ed25519PrivateKey",
+                        ArrivesDuringGeneration)
+    return other.public_key().public_bytes_raw().hex()
+
+
+@pytest.mark.parametrize("hard_links", [True, False],
+                         ids=["hard-links", "no-hard-links"])
+def test_a_key_another_writer_put_down_first_is_kept(tmp_path, monkeypatch,
+                                                     hard_links):
+    keystore_dir = tmp_path / "identity"
+    keystore = Keystore(str(keystore_dir))
+    if not hard_links:
+        def no_links(src, dst):
+            raise OSError(errno.EPERM, "Operation not permitted")
+        monkeypatch.setattr(os, "link", no_links)
+    first = writer_arrives_first(monkeypatch, keystore_dir, "seller")
+
+    identity = keystore.new_identity("seller")
+
+    assert identity["controller_public"] == first
+    assert key_public(keystore_dir, "seller") == first
+    assert resolve_file(keystore.registry_path, identity["agent_id"]) == first
+
+
+def test_a_home_without_hard_links_still_creates_identities(tmp_path,
+                                                            monkeypatch):
+    def no_links(src, dst):
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+    monkeypatch.setattr(os, "link", no_links)
+    keystore = Keystore(str(tmp_path / "identity"))
+
+    identity = keystore.new_identity("seller")
+
+    assert keystore.new_identity("seller") == identity
+    assert identity["controller_public"] == key_public(tmp_path / "identity",
+                                                       "seller")
+
+
+def test_a_private_key_a_dead_writer_left_staged_is_removed(tmp_path):
+    keystore_dir = tmp_path / "identity"
+    keystore = Keystore(str(keystore_dir))
+    leftover = keystore_dir / ".staged-0123456789abcdef"
+    leftover.write_text(Ed25519PrivateKey.generate().private_bytes_raw().hex())
+
+    keystore.new_identity("seller")
+
+    assert not leftover.exists()
+    assert not [p for p in keystore_dir.iterdir()
+                if p.name.startswith(".staged-")]
+
+
+def test_a_key_the_registry_lists_under_another_name_is_refused(tmp_path):
+    keystore_dir = tmp_path / "identity"
+    keystore = Keystore(str(keystore_dir))
+    keystore.new_identity("alice")
+    (keystore_dir / "bob.controller.key").write_bytes(
+        (keystore_dir / "alice.controller.key").read_bytes())
+
+    with pytest.raises(IdentityError, match="registered as 'alice'"):
+        keystore.new_identity("bob")
+    with pytest.raises(IdentityError):
+        keystore.identity("bob")
+
+
+def test_a_key_the_registry_does_not_list_is_no_identity(tmp_path):
+    keystore = Keystore(str(tmp_path / "identity"))
+    keystore.new_identity("seller")
+    Path(keystore.registry_path).unlink()
+
+    with pytest.raises(IdentityError):
+        keystore.identity("seller")
+    with pytest.raises(IdentityError):
+        keystore.make_grant("seller", "run-1")
+
+
+def test_a_damaged_key_file_is_an_identity_error(tmp_path):
+    keystore_dir = tmp_path / "identity"
+    keystore = Keystore(str(keystore_dir))
+    keystore.new_identity("seller")
+    (keystore_dir / "seller.controller.key").write_text("not a key\n")
+
+    with pytest.raises(IdentityError, match="does not hold a controller key"):
+        keystore.new_identity("seller")
+
+
+def test_the_registry_keeps_its_permissions_and_its_link(tmp_path):
+    keystore_dir = tmp_path / "identity"
+    shared = tmp_path / "shared-registry.json"
+    shared.write_text("{}")
+    shared.chmod(0o600)
+    keystore_dir.mkdir()
+    (keystore_dir / "registry.json").symlink_to(shared)
+    keystore = Keystore(str(keystore_dir))
+
+    identity = keystore.new_identity("seller")
+
+    assert (keystore_dir / "registry.json").is_symlink()
+    assert identity["agent_id"] in json.loads(shared.read_text())
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o600
