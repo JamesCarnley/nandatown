@@ -124,9 +124,12 @@ def cmd_test_agent(args: argparse.Namespace) -> int:
         if args.index and not args.agent_name:
             print("--index needs --agent-name to choose the index entry")
             return 2
-        print(f"nandatown {__version__}: path test of"
-              f" {args.url or args.agent_name} under profile"
-              f" {args.path_profile}")
+        from .url_credentials import Labeller
+
+        # Printed as it is recorded: credentials in the URL are labelled.
+        subject = Labeller().label(args.url) if args.url else args.agent_name
+        print(f"nandatown {__version__}: path test of {subject} under"
+              f" profile {args.path_profile}")
         bundle_dir, result = run_path_test(
             args.url, args.out, profile_ref=args.path_profile,
             pin_card_digest=args.pin_card_digest,
@@ -694,7 +697,11 @@ def cmd_a2a(args: argparse.Namespace) -> int:
             return 2
         from .a2a_adapter import probe_endpoint
 
+        from .url_credentials import safe_message
+
         report = probe_endpoint(args.url)
+        report["problems"] = [safe_message(args.url, problem)
+                              for problem in report["problems"]]
         print(json.dumps(report, indent=2))
         if report["ok"]:
             print("A2A edge passed: agent card valid, message/send"
