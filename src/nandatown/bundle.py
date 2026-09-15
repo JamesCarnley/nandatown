@@ -196,11 +196,12 @@ def load_bundle(directory: str) -> dict[str, Any]:
 #
 # This list matters only for a bundle this Town cannot replay. A bundle
 # whose recorded version it still has the rules for, which today means
-# every Track version and each Path profile from path-0.2, is replayed,
-# and verify, receipts and proof judge that replay. A bundle naming a
-# version listed here that this Town can no longer replay, such as an
-# older Lab evaluator or path-0.1, is accepted for a receipt without
-# replay, and the receipt says so; any other version is refused.
+# every Track version, the current Lab evaluator and each Path profile
+# from path-0.2, is replayed, and verify, receipts and proof judge that
+# replay. A bundle naming a version listed here that this Town can no
+# longer replay, such as an older Lab evaluator or path-0.1, is accepted
+# for a receipt without replay, and the receipt says so; any other
+# version is refused.
 SHIPPED_EVALUATOR_VERSIONS: dict[str, frozenset[str]] = {
     "track": frozenset({"0.2.0", "0.3.0", "0.4.0"}),
     "lab": frozenset({"lab-0.2.0", "lab-0.2.1", "lab-0.2.2", "lab-0.2.3",
@@ -252,9 +253,9 @@ def verify_bundle_integrity(
     cross-record bindings, unsupported or unrecognised evaluator, replay
     mismatch under the local evaluator, attestation) and, separately, the
     evaluator version difference that left replay unchecked when the
-    bundle names an earlier version shipped for its mode. Any other
-    version can be neither replayed nor recognised, so it is an
-    integrity problem."""
+    bundle names a version shipped for its mode that this Town cannot
+    replay. Any other version can be neither replayed nor recognised, so
+    it is an integrity problem."""
     integrity: list[str] = []
     differs: EvaluatorVersionDiffers | None = None
     for problem in verify_bundle(directory):

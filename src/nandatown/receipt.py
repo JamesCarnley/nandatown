@@ -32,8 +32,9 @@ DEFAULT_LIMITATIONS = [
     "a favorable result grants no permissions and endorses nothing",
 ]
 
-# A receipt states this among its limitations when its bundle was accepted
-# on the strength of a known earlier evaluator version rather than replayed.
+# A receipt states this among its limitations when its bundle names an
+# evaluator version this project shipped but this Town cannot replay, and
+# so was accepted without replay.
 # Callers match on the prefix, so it stays stable.
 REPLAY_DISCLOSURE_PREFIX = "evaluator replay not checked: "
 
@@ -303,10 +304,10 @@ def make_receipt(bundle_dir: str, keystore=None,
     """Sign a sanitized receipt over a bundle; returns its path.
 
     Raises ValueError, naming each problem, when the bundle fails
-    bundle_receipt_check. A bundle recorded by a known earlier evaluator
-    version is accepted without replay, and the receipt states that among
-    its signed limitations, so the disclosure travels with the receipt to
-    a reader who does not have the bundle."""
+    bundle_receipt_check. A bundle naming a shipped evaluator version this
+    Town cannot replay is accepted without replay, and the receipt states
+    that among its signed limitations, so the disclosure travels with the
+    receipt to a reader who does not have the bundle."""
     from .bundle import load_bundle
     from .identity_portable import (
         OPERATOR_NAME,
@@ -367,9 +368,9 @@ def verify_receipt(receipt_path: str,
     verifies (which still proves commitment, not truth). With a bundle,
     the bundle must also pass bundle_receipt_check and match every
     receipt claim. An empty result means the receipt verifies, not that
-    the result was replayed; a receipt over a bundle recorded by a known
-    earlier evaluator version states that among its limitations, and
-    replay_disclosures reads it back.
+    the result was replayed; a receipt over a bundle this Town could not
+    replay states that among its limitations, and replay_disclosures reads
+    it back.
 
     Limitations are not compared with the bundle. They record what was
     true when the receipt was signed, and a later Town upgrade must not
