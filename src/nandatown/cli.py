@@ -132,8 +132,8 @@ def cmd_test_agent(args: argparse.Namespace) -> int:
             print("note: this URL has an '@' after its host. If part of it is"
                   " a password or token, percent-encode any '/', '?' or '#'"
                   " in it (as %2F, %3F, %23): unencoded, httpx reads them as"
-                  " the end of the host, and the URL is sent and recorded as"
-                  " written.")
+                  " the end of the host, and what follows is sent and"
+                  " recorded as written.")
         # Printed as it is recorded: credentials in the URL are labelled.
         subject = Labeller().label(args.url) if args.url else args.agent_name
         print(f"nandatown {__version__}: path test of {subject} under"
@@ -387,17 +387,19 @@ def cmd_pulse(args: argparse.Namespace) -> int:
     if args.count < 1:
         print("--count must be at least 1")
         return 2
-    from .url_credentials import has_credentials, safe_message, withhold
+    from .url_credentials import safe_message, withhold
 
     targets = {}
     for target in args.target:
         name, _, url = target.partition("=")
-        if "://" in name and has_credentials(target):
+        if "://" in name and "@" in target:
             # No name before the URL: it was left out, mistyped as "name:",
-            # or the password holds the "=" the target was split at. Echoing
-            # either half would repeat part of the password.
+            # or the password holds the "=" the target was split at. Any "@"
+            # may end a password, parsed as credentials or not, and echoing
+            # either half could repeat part of it.
             print("a --target must look like name=url; this one is a URL"
-                  " with credentials and no name")
+                  " with no name, not repeated because it may hold"
+                  " credentials")
             return 2
         if not url:
             print(f"target {target!r} must look like name=url")

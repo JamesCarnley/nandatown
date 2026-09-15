@@ -115,15 +115,18 @@ def withhold(url: str) -> str:
 
 
 def at_after_host(url: object) -> bool:
-    """Whether url has an "@" that httpx does not read as credentials.
+    """Whether url has an "@" after the end of its authority.
 
     httpx ends a URL's authority at the first "/", "?" or "#". A password
     holding one of those, written unencoded, therefore turns into a host,
     a path and an "@" that ends nothing, and Town, which finds credentials
     where httpx does, cannot tell that from an ordinary "@" in a path such
-    as "/users/a@b". Callers can warn without repeating the URL.
+    as "/users/a@b". When the password also holds an "@" before that
+    character, httpx does find credentials, only the wrong ones: the part
+    before the "@", with the rest read as host and path. Callers can warn
+    without repeating the URL.
     """
-    if not isinstance(url, str) or has_credentials(url):
+    if not isinstance(url, str):
         return False
     scheme = _SCHEME.search(url)
     if scheme is None or _parses(url[scheme.start():].strip()) is None:

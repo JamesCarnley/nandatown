@@ -85,8 +85,9 @@ Credentials are found where httpx finds them: everything before the last `@`
 that comes before the first `/`, `?` or `#`. A password may contain quotes,
 brackets or spaces. Percent-encode a `/`, `?` or `#` inside one (as `%2F`, `%3F`,
 `%23`). Unencoded, httpx reads it as the end of the host, so the URL goes to a
-different host with no credentials and is recorded as written; Town cannot tell
-that from an ordinary `@` in a path, and prints a note when it sees one. A URL
+different host, with no credentials or only the part of the password before an
+`@`, and what follows is recorded as written; Town cannot tell that from an
+ordinary `@` in a path, and prints a note when it sees an `@` after the host. A URL
 httpx cannot parse at all is not shown. Only credentials in the URL's user
 information are recognised, not a token in a query string or header. Labels
 belong to one Town home: Pulse history read from another home labels its older

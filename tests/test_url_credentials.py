@@ -258,6 +258,10 @@ def test_an_at_sign_httpx_reads_as_path_is_flagged_not_guessed():
 
     assert at_after_host(ambiguous)
     assert at_after_host("http://h/users/a@b")
+    # A password "SplitA@SplitB/SplitC": httpx sends "SplitA" to "SplitB",
+    # and "SplitC" is left in the path.
+    assert has_credentials("http://alice:SplitA@SplitB/SplitC@127.0.0.1:9")
+    assert at_after_host("http://alice:SplitA@SplitB/SplitC@127.0.0.1:9")
     assert not at_after_host("http://alice:pw@127.0.0.1:9/x")
     assert not at_after_host("http://127.0.0.1:9/x")
     # Neither form is rewritten: guessing would hide a real host.
@@ -811,6 +815,8 @@ def test_pulse_never_keeps_a_password_with_quotes_brackets_or_spaces(
 @pytest.mark.parametrize("target", [
     f"svc=http://{USER}:Hash#Pw1@127.0.0.1:9",
     f"http://{USER}:p=w0rd@127.0.0.1:9",   # no name, and "=" in the password
+    f"http://{USER}:2024/w0rd@127.0.0.1:9",  # no name, and read as a path
+    f"http://{USER}:Hash#w0rd@127.0.0.1:9",  # no name, and unparseable
 ])
 def test_a_malformed_pulse_target_is_not_echoed_with_its_credentials(
         tmp_path, capsys, target):
