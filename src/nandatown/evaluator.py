@@ -22,7 +22,7 @@ from .records import (
     json_type,
 )
 
-EVALUATOR_VERSION = "0.4.0"
+EVALUATOR_VERSION = "0.5.0"
 LEGACY_EVALUATOR_VERSION = "0.2.0"
 CORRELATION_EVALUATOR_VERSION = "0.3.0"
 # The rules each Track evaluator version applies. A recorded bundle replays
@@ -37,11 +37,14 @@ CORRELATION_EVALUATOR_VERSION = "0.3.0"
 # checks ("correlation") but read any truthy acknowledgement flag as a yes
 # and judged only the first accepted request. 0.4.0 reads a flag only when
 # it is a boolean ("boolean_flags") and judges every accepted request
-# ("every_request").
+# ("every_request"). 0.5.0 recognises the injected duplicate only from an
+# acknowledgement of that delivery, bound by its fence ("bound_duplicate").
 EVALUATOR_RULES: dict[str, frozenset[str]] = {
     LEGACY_EVALUATOR_VERSION: frozenset(),
     CORRELATION_EVALUATOR_VERSION: frozenset({"correlation"}),
     "0.4.0": frozenset({"correlation", "boolean_flags", "every_request"}),
+    "0.5.0": frozenset({"correlation", "boolean_flags", "every_request",
+                        "bound_duplicate"}),
 }
 EVALUATOR_VERSIONS = tuple(EVALUATOR_RULES)
 assert EVALUATOR_VERSION in EVALUATOR_RULES
@@ -437,6 +440,26 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                       if (_asserted(a.detail.get("note"), "duplicate") is True
                           if strict_flags
                           else a.detail.get("note", {}).get("duplicate"))]
+        missing_note = "no duplicate offer recognized exactly once"
+        if "bound_duplicate" in rules:
+            # A lease lost before the offer brings a redelivery the seller
+            # also acknowledges as a duplicate, often with the application
+            # it performed. That is not the injected delivery, so only an
+            # acknowledgement under an offer's own fence recognises it.
+            by_fence = {o.detail.get("fence"): o for o in offered
+                        if o.subject == request_id
+                        and isinstance(o.detail.get("fence"), str)}
+            unbound = [a for a in recognized
+                       if a.detail.get("fence") not in by_fence]
+            recognized = [a for a in recognized
+                          if a.detail.get("fence") in by_fence]
+            offered = ([by_fence[recognized[0].detail["fence"]]]
+                       if recognized else list(by_fence.values()))
+            if unbound and not recognized:
+                missing_note = ("the injected duplicate delivery was never"
+                                " acknowledged; the acknowledgement marked"
+                                " duplicate answered an earlier redelivery,"
+                                " not the offer")
         # Recognising a duplicate means the one application was not
         # repeated, which an unreadable application claim leaves open.
         if offered and recognized and len(applied) == 1 and not unreadable:
@@ -444,9 +467,7 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
                                   [offered[0].event_id,
                                    recognized[0].event_id]))
         else:
-            stages.append(_missing("duplicate_recognized",
-                                   "no duplicate offer recognized exactly"
-                                   " once"))
+            stages.append(_missing("duplicate_recognized", missing_note))
     elif fault == "drop_wakeup":
         suppressed = find("notify_suppressed")
         if suppressed and claims:
