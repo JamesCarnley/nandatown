@@ -591,6 +591,34 @@ def test_a_mistyped_harness_is_not_echoed_with_its_credentials(
     assert SECRET not in message
 
 
+def test_a_credential_free_report_shows_its_rerun_as_recorded(tmp_path):
+    """A rerun command is not a URL. Read whole, "http://host:port ...
+    --path-profile name@0.3" parses as credentials running up to that "@"."""
+    with httpx.Client(base_url="http://127.0.0.1:30536",
+                      transport=httpx.MockTransport(lambda r: httpx.Response(
+                          200, json=build_agent_card("http://127.0.0.1:30536")))
+                      ) as http:
+        bundle, _ = run_path_test("http://127.0.0.1:30536",
+                                  str(tmp_path / "runs"), http=http)
+
+    loaded = load_bundle(bundle)
+    rerun = loaded["run"].config["rerun_command"]
+    report = render_report(loaded)
+
+    assert "@0.3" in rerun and "<credentials" not in report
+    assert f"Rerun:     {rerun}" in report
+
+
+def test_an_old_reports_rerun_keeps_its_host_and_profile(old_bundle):
+    report = render_report(load_bundle(str(old_bundle)))
+    rerun = next(line for line in report.splitlines()
+                 if line.startswith("Rerun:"))
+
+    assert OLD_SECRET not in rerun
+    assert "@0.3" not in rerun.split("--path-profile")[0].rsplit("@", 1)[-1]
+    assert "--path-profile a2a-capability-fulfillment@0.3" in rerun
+
+
 def test_a_run_without_credentials_never_creates_the_key(tmp_path, town_home):
     run_path_test("http://127.0.0.1:9", str(tmp_path / "runs"))
 

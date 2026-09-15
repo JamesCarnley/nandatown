@@ -182,18 +182,23 @@ def _withhold_recorded_credentials(bundle: dict[str, Any], text: str) -> str:
     recorded, and nothing else in the report is searched.
     """
     scrubber = Scrubber(Labeller(withhold_only=True))
-    # Everything the run's configuration recorded: the subject, a Track
-    # harness such as "a2a:http://user:secret@host", and each word of the
-    # rerun command, where shell quoting may have respelled a password.
+    # The subject, recorded whole even if its password holds a space.
+    scrubber.register(bundle["run"].config.get("subject"))
+    # Everything else the run's configuration recorded: a Track harness
+    # such as "a2a:http://user:secret@host", and the words of a rerun
+    # command, where shell quoting may have respelled a password. A command
+    # is not read whole: "--url http://host:1 --path-profile name@0.3"
+    # parses as credentials running up to that last "@".
     for recorded in _strings(bundle["run"].config):
-        scrubber.register(recorded)
-        if any(ch.isspace() for ch in recorded):
-            try:
-                words = shlex.split(recorded)
-            except ValueError:
-                words = recorded.split()
-            for word in words:
-                scrubber.register(word)
+        if not any(ch.isspace() for ch in recorded):
+            scrubber.register(recorded)
+            continue
+        try:
+            words = shlex.split(recorded)
+        except ValueError:
+            words = recorded.split()
+        for word in words:
+            scrubber.register(word)
     for event in bundle.get("events") or []:
         if event.kind in ("resolution_hop", "resolution_failed",
                           "card_retrieved", "card_fetch_failed"):
