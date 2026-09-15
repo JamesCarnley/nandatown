@@ -531,6 +531,31 @@ def test_a_read_only_home_does_not_stop_a_run(tmp_path, town_home):
     assert WITHHELD in load_bundle(bundle)["run"].config["subject"]
 
 
+def test_a_fresh_claim_dated_by_a_skewed_clock_is_still_waited_for(
+        town_home):
+    """Where hard links fail, as on some network shares, the file server
+    dates the claim, and its clock may run seconds behind this machine's."""
+    town_home.mkdir(parents=True)
+    claim = town_home / KEY_FILENAME
+    claim.touch()
+    skewed = time.time() - 10
+    os.utime(claim, (skewed, skewed))
+    key = b"k" * 32
+
+    def publish():
+        time.sleep(0.3)
+        staged = town_home / "staged"
+        staged.write_bytes(key)
+        os.replace(staged, claim)
+
+    publisher = threading.Thread(target=publish)
+    publisher.start()
+    try:
+        assert local_key(str(town_home)) == key
+    finally:
+        publisher.join()
+
+
 def test_a_corrupt_key_withholds_credentials_rather_than_fail(
         tmp_path, town_home):
     town_home.mkdir(parents=True)
@@ -546,11 +571,11 @@ def test_a_corrupt_key_withholds_credentials_rather_than_fail(
 
 def test_an_abandoned_key_claim_is_reported_at_once(town_home):
     """An empty key file is a claim another process is still publishing,
-    unless it is older than publishing takes."""
+    unless it is dated well before any publication could be under way."""
     town_home.mkdir(parents=True)
     claim = town_home / KEY_FILENAME
     claim.touch()
-    long_ago = time.time() - 60
+    long_ago = time.time() - 3600
     os.utime(claim, (long_ago, long_ago))
 
     started = time.monotonic()

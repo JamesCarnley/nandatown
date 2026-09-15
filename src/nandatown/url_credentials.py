@@ -219,6 +219,7 @@ def _publish_without_links(staged: str, path: str) -> None:
 
 
 _PUBLISH_WAIT_SECONDS = 5.0
+_ABANDONED_SECONDS = 120.0
 
 
 def _read_key(path: str) -> bytes | None:
@@ -226,9 +227,10 @@ def _read_key(path: str) -> bytes | None:
 
     A key is only ever published whole, so a new empty file is another
     process's claim on the path, still being published, and is waited for.
-    An empty file older than publishing takes was abandoned, and any other
-    length is a damaged key: saying so at once is better than waiting, or
-    labelling with it.
+    An empty file dated well before any publication could still be under
+    way was abandoned, and any other length is a damaged key: saying so at
+    once is better than waiting, or labelling with it. The margin allows
+    for a file server whose clock differs from this machine's.
     """
     deadline = time.monotonic() + _PUBLISH_WAIT_SECONDS
     while True:
@@ -240,7 +242,7 @@ def _read_key(path: str) -> bytes | None:
             return None
         if len(key) == _KEY_BYTES:
             return key
-        if key or age > _PUBLISH_WAIT_SECONDS or time.monotonic() > deadline:
+        if key or age > _ABANDONED_SECONDS or time.monotonic() > deadline:
             raise CredentialKeyError(
                 f"{path} is not a {_KEY_BYTES}-byte key; remove it to create"
                 " a new one, which changes every label from here on")
