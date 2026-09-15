@@ -558,3 +558,32 @@ def test_an_abandoned_claim_says_how_to_recover(tmp_path, monkeypatch):
 
     with pytest.raises(IdentityError, match="delete the file"):
         keystore.new_identity("seller")
+
+
+def test_a_failed_publication_withdraws_only_its_own_empty_claim(tmp_path,
+                                                                 monkeypatch):
+    """If publishing fails after the key has already replaced the claim,
+    or after another writer's key took its place, that key stays."""
+    keystore_dir = tmp_path / "identity"
+    keystore = Keystore(str(keystore_dir))
+    without_hard_links(monkeypatch)
+    replace = identity_portable._replace
+
+    def replaced_then_failed(staged, path):
+        replace(staged, path)
+        raise OSError(errno.EIO, "failed after the key was in place")
+
+    monkeypatch.setattr(identity_portable, "_replace", replaced_then_failed)
+    with pytest.raises(OSError):
+        keystore._publish_key("seller")
+
+    assert (keystore_dir / "seller.controller.key").stat().st_size > 0
+
+    def failed_before_replacing(staged, path):
+        raise OSError(errno.EIO, "failed before the key was in place")
+
+    monkeypatch.setattr(identity_portable, "_replace", failed_before_replacing)
+    with pytest.raises(OSError):
+        keystore._publish_key("buyer")
+
+    assert not (keystore_dir / "buyer.controller.key").exists()

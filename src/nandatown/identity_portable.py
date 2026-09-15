@@ -160,13 +160,27 @@ def _remove_staged(directory: str) -> None:
                 os.unlink(path)
 
 
-def _claim(path: str) -> bool:
-    """Create path empty, only if nothing is there; whether we did."""
+def _claim(path: str) -> tuple[int, int] | None:
+    """Create path empty, only if nothing is there. Returns the claim's
+    device and inode, or None if something was already there."""
     try:
-        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
-        return False
-    return True
+        return None
+    try:
+        info = os.fstat(fd)
+    finally:
+        os.close(fd)
+    return info.st_dev, info.st_ino
+
+
+def _withdraw_claim(path: str, claim: tuple[int, int]) -> None:
+    """Remove path only if it is still our own empty claim: a key that
+    replaced it, ours or another writer's, is never removed."""
+    with contextlib.suppress(FileNotFoundError):
+        info = os.lstat(path)
+        if (info.st_dev, info.st_ino) == claim and info.st_size == 0:
+            os.unlink(path)
 
 
 def _replace(staged: str, path: str) -> None:
@@ -291,8 +305,8 @@ class Keystore:
         if not text:
             raise _UnwrittenKey(
                 f"{path} is empty: a Town creating this identity has claimed"
-                " it, or stopped before writing it. If none is creating it,"
-                " delete the file to create a new identity")
+                " it, or stopped before writing it. If no Town process is"
+                " running, delete the file to create a new identity")
         try:
             private = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(text))
         except ValueError as exc:
@@ -370,12 +384,12 @@ class Keystore:
             except FileExistsError:
                 pass
             except OSError:
-                if _claim(path):
+                claim = _claim(path)
+                if claim is not None:
                     try:
                         _replace(staged, path)
-                    except BaseException:
-                        with contextlib.suppress(FileNotFoundError):
-                            os.unlink(path)  # our own empty claim
+                    except OSError:
+                        _withdraw_claim(path, claim)
                         raise
         finally:
             with contextlib.suppress(FileNotFoundError):
