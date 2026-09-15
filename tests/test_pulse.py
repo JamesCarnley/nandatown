@@ -286,11 +286,14 @@ def start_redirect_server(location):
 
 
 # httpx prepares the next request for any redirect, even one it will not
-# follow, and reading the host of these Locations raises while it does.
+# follow, and these Locations raise while it does: reading the host of the
+# first three, and parsing the last, which httpx reports as a protocol
+# error like a server's own malformed response.
 MALFORMED_LOCATIONS = [
     pytest.param("http://xn--a.localhost:9/", id="undecodable-a-label"),
     pytest.param("http://xn--.localhost:9/", id="empty-a-label"),
     pytest.param("//xn--a.localhost/", id="scheme-relative"),
+    pytest.param("http://[::1/", id="invalid-url"),
 ]
 
 
@@ -344,3 +347,36 @@ def test_a_well_formed_redirect_is_unchanged():
 
     assert (result["ok"], result["status"]) == (True, 302)
     assert "error" not in result
+
+
+class TruncatedBodyHandler(http.server.BaseHTTPRequestHandler):
+    status = 200
+
+    def do_GET(self):
+        self.send_response(self.status)
+        self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+        self.send_header("Content-Length", "100")
+        self.end_headers()
+        self.wfile.write(b"too short")
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.mark.parametrize("status", [200, 302])
+def test_a_body_that_never_arrives_is_still_a_failed_probe(status):
+    """Only a redirect httpx cannot build is kept as the server's answer:
+    a response whose body is cut short, redirect or not, is a failure."""
+    handler = type("Handler", (TruncatedBodyHandler,), {"status": status})
+    server = http.server.HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        result = probe(f"http://127.0.0.1:{server.server_port}/")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert (result["ok"], result["status"]) == (False, 0)
+    assert result["error"] == "RemoteProtocolError"
