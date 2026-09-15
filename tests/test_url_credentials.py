@@ -6,15 +6,19 @@ bundle, report, receipt or Pulse history that never contains them proves
 they went nowhere else.
 """
 
+import base64
 import contextlib
+import http.server
 import json
 import os
 import re
 import shutil
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -25,6 +29,12 @@ from nandatown.a2a_adapter import build_agent_card
 from nandatown.bundle import load_bundle, verify_bundle
 from nandatown.cli import main
 from nandatown.path_runner import run_path_test
+from nandatown.pulse import (
+    availability,
+    export_records,
+    render_pulse_report,
+    run_pulse,
+)
 from nandatown.receipt import make_receipt, verify_receipt
 from nandatown.report import render_report
 from nandatown.url_credentials import (
@@ -467,3 +477,148 @@ def test_reports_of_old_evidence_withhold_its_credentials(old_bundle):
     assert WITHHELD in report
 
 
+# ---- Pulse -----------------------------------------------------------------
+
+@pytest.fixture
+def auth_server():
+    """200 for alice:s3cret-pw, 401 for anything else."""
+    expected = "Basic " + base64.b64encode(f"{USER}:{SECRET}".encode()).decode()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            ok = self.headers.get("Authorization") == expected
+            self.send_response(200 if ok else 401)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def db_text(db):
+    with sqlite3.connect(db) as conn:
+        return json.dumps(conn.execute("SELECT * FROM probes").fetchall())
+
+
+def test_pulse_probes_with_credentials_and_keeps_only_labels(
+        tmp_path, auth_server):
+    db = str(tmp_path / "pulse.db")
+
+    run_pulse({"svc": f"http://{USER}:{SECRET}@{auth_server}"}, count=2,
+              interval=0, db_path=db)
+
+    assert SECRET not in db_text(db)
+    with sqlite3.connect(db) as conn:
+        assert {row[0] for row in conn.execute(
+            "SELECT status FROM probes")} == {200}
+    assert SECRET not in render_pulse_report(db)
+    assert SECRET not in json.dumps(
+        [r.model_dump() for r in export_records(db)])
+    assert "<credentials " in availability(db)["svc"]["url"]
+
+
+def test_pulse_keeps_two_sets_of_credentials_apart(tmp_path, auth_server):
+    db = str(tmp_path / "pulse.db")
+    run_pulse({"svc": f"http://{USER}:wrong@{auth_server}"}, count=1,
+              interval=0, db_path=db)
+    run_pulse({"svc": f"http://{USER}:{SECRET}@{auth_server}"}, count=1,
+              interval=0, db_path=db)
+
+    current = availability(db)["svc"]
+    assert len(current["previous_endpoints"]) == 1
+    assert current["url"] != current["previous_endpoints"][0]["url"]
+
+
+def test_pulse_history_recorded_before_this_is_labelled_and_joined(
+        tmp_path, auth_server):
+    db = str(tmp_path / "pulse.db")
+    url = f"http://{USER}:{SECRET}@{auth_server}"
+    run_pulse({"svc": url}, count=1, interval=0, db_path=db)
+    with sqlite3.connect(db) as conn:
+        # What an earlier Town wrote: the URL itself.
+        conn.execute("INSERT INTO probes VALUES (?,?,?,?,?,?)",
+                     ("svc", url, time.time() - 60, 1, 200, 3.0))
+
+    current = availability(db)["svc"]
+    assert current["checks"] == 2 and current["previous_endpoints"] == []
+    assert SECRET not in render_pulse_report(db)
+    assert SECRET not in json.dumps(
+        [r.model_dump() for r in export_records(db)])
+
+
+def test_pulse_never_prints_earlier_credentials(tmp_path, capsys,
+                                                auth_server):
+    """The reported case: a target re-pointed away from credentials."""
+    db = str(tmp_path / "pulse.db")
+    for target in (f"svc=http://{USER}:{SECRET}@{auth_server}",
+                   f"svc=http://{auth_server}"):
+        assert main(["pulse", "--target", target, "--count", "1",
+                     "--interval", "0", "--db", db]) == 0
+    assert main(["pulse", "--report", "--db", db]) == 0
+    assert main(["pulse", "--records", "--db", db]) == 0
+
+    assert SECRET not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("password", ["Qu0te'Pw", 'Dq"Pw', "An<gl>e",
+                                      "Sp ace"])
+def test_pulse_never_keeps_a_password_with_quotes_brackets_or_spaces(
+        tmp_path, password):
+    db = str(tmp_path / "pulse.db")
+
+    run_pulse({"svc": f"http://{USER}:{password}@127.0.0.1:9"}, count=1,
+              interval=0, db_path=db)
+
+    assert password not in db_text(db)
+    assert password not in render_pulse_report(db)
+    assert password not in json.dumps(
+        [r.model_dump() for r in export_records(db)])
+
+
+@pytest.mark.parametrize("target", [
+    f"svc=http://{USER}:Hash#Pw1@127.0.0.1:9",
+    f"http://{USER}:p=w0rd@127.0.0.1:9",   # no name, and "=" in the password
+])
+def test_a_malformed_pulse_target_is_not_echoed_with_its_credentials(
+        tmp_path, capsys, target):
+    assert main(["pulse", "--target", target, "--count", "1",
+                 "--db", str(tmp_path / "p.db")]) == 2
+
+    out = capsys.readouterr().out
+    assert "Hash" not in out and "w0rd" not in out, out
+
+
+def test_pulse_history_is_readable_from_a_home_that_cannot_hold_a_key(
+        tmp_path, town_home):
+    db = str(tmp_path / "pulse.db")
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE probes (name TEXT NOT NULL, url TEXT NOT"
+                     " NULL, at REAL NOT NULL, ok INTEGER NOT NULL, status"
+                     " INTEGER NOT NULL, latency_ms REAL NOT NULL)")
+        conn.execute("INSERT INTO probes VALUES (?,?,?,?,?,?)",
+                     ("svc", f"http://{USER}:{SECRET}@127.0.0.1:9",
+                      time.time(), 1, 200, 3.0))
+    town_home.mkdir(parents=True)
+    town_home.chmod(0o500)
+    try:
+        report = render_pulse_report(db)
+    finally:
+        town_home.chmod(0o700)
+
+    assert SECRET not in report
+
+
+def test_an_unusable_pulse_target_is_refused_without_its_credentials(
+        tmp_path, capsys):
+    assert main(["pulse", "--target",
+                 f"svc=http://{USER}:{SECRET}@xn--a.localhost:9",
+                 "--count", "1", "--db", str(tmp_path / "p.db")]) == 2
+
+    assert SECRET not in capsys.readouterr().out

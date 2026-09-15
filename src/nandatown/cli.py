@@ -379,8 +379,17 @@ def cmd_pulse(args: argparse.Namespace) -> int:
     if args.count < 1:
         print("--count must be at least 1")
         return 2
+    from .url_credentials import has_credentials, safe_message, withhold
+
     targets = {}
     for target in args.target:
+        if has_credentials(target):
+            # A target that is itself a URL with credentials has no name,
+            # and splitting it at an "=" in its password would echo both
+            # halves of the password back: say what is wrong, not what it is.
+            print("a --target must look like name=url; this one is a URL"
+                  " with credentials and no name")
+            return 2
         name, _, url = target.partition("=")
         if not url:
             print(f"target {target!r} must look like name=url")
@@ -391,8 +400,8 @@ def cmd_pulse(args: argparse.Namespace) -> int:
             return 2
         problem = unprobeable(url)
         if problem is not None:
-            print(f"target {name!r} has an unusable URL {url!r}:"
-                  f" {problem}")
+            print(f"target {name!r} has an unusable URL {withhold(url)!r}:"
+                  f" {safe_message(url, problem)}")
             return 2
         targets[name] = url
     if not targets:
