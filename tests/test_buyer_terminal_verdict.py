@@ -153,3 +153,26 @@ def test_a_buyer_process_that_changes_its_mind_fails_the_run(tmp_path):
     assert stage(result, "correct").status == "failed", detail
     assert result.verdict == "failed", detail
     assert verify_bundle(bundle_dir) == []
+
+
+@pytest.mark.parametrize("order", ["true-then-false", "false-then-true"])
+def test_disagreeing_terminal_assertions_decide_nothing_in_either_order(
+        order):
+    """Even where the response names no request, order must not decide."""
+    first, second = (RIGHT, WRONG) if order == "true-then-false" else (
+        WRONG, RIGHT)
+    base = clean_events()
+    # The response names no request, so it cannot be shown to answer one.
+    base[5] = base[5].model_copy(update={"detail": {
+        k: v for k, v in base[5].detail.items() if k != "request_id"}})
+    events = base[:8] + [
+        ev(9, "ack_recorded", "r-1", observer="buyer", status="processed",
+           note=first, attempt=1),
+        ev(10, "ack_recorded", "r-1", observer="buyer", status="processed",
+           note=second, attempt=2),
+        ev(11, "run_finished", "run-1"),
+    ]
+
+    correct = stage(evaluate(profile(), "run-1", events), "correct")
+
+    assert correct.status == "not_enough_evidence", correct

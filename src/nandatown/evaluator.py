@@ -399,7 +399,10 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
         verdict_acks = [a for a in verdict_acks
                         if _asserted(a.detail.get("note"), "correct")
                         is not None]
-    conflicting = (terminal_verdict and mismatch is None
+    # Order must not decide. Where a mismatch already fails the stage the
+    # assertions cannot rescue it, so only that case is exempt.
+    conflicting = (terminal_verdict
+                   and (mismatch is None or mismatch[0] != "failed")
                    and len({_asserted(a.detail["note"], "correct")
                             for a in verdict_acks}) > 1)
     if not verdict_acks and unreadable_verdicts:
@@ -482,21 +485,32 @@ def evaluate(profile: TestProfile, run_id: str, events: list[TownEvent],
             # A lease lost before the offer brings a redelivery the seller
             # also acknowledges as a duplicate, often with the application
             # it performed. That is not the injected delivery, so only an
-            # acknowledgement under an offer's own fence recognises it.
+            # acknowledgement under an offer's own fence recognises it. It
+            # must also settle the offer as processed: the runner counts
+            # nothing less as the duplicate handled, the protocol asks for
+            # it, and a retryable acknowledgement is provisional.
             by_fence = {o.detail.get("fence"): o for o in offered
                         if o.subject == request_id
                         and isinstance(o.detail.get("fence"), str)}
-            unbound = [a for a in recognized
-                       if a.detail.get("fence") not in by_fence]
-            recognized = [a for a in recognized
-                          if a.detail.get("fence") in by_fence]
+
+            def bound(ack: TownEvent) -> bool:
+                fence = ack.detail.get("fence")
+                return (isinstance(fence, str) and fence in by_fence
+                        and ack.detail.get("status") == "processed")
+
+            unbound = [a for a in recognized if not bound(a)]
+            recognized = [a for a in recognized if bound(a)]
             offered = ([by_fence[recognized[0].detail["fence"]]]
                        if recognized else list(by_fence.values()))
-            if unbound and not recognized:
+            if not by_fence:
+                missing_note = ("the town never offered the injected"
+                                " duplicate delivery")
+            elif unbound and not recognized:
                 missing_note = ("the injected duplicate delivery was never"
-                                " acknowledged; the acknowledgement marked"
-                                " duplicate answered an earlier redelivery,"
-                                " not the offer")
+                                " acknowledged as processed; the"
+                                " acknowledgement marked duplicate answered"
+                                " another delivery, or did not settle the"
+                                " offer")
         # Recognising a duplicate means the one application was not
         # repeated, which an unreadable application claim leaves open.
         if offered and recognized and len(applied) == 1 and not unreadable:

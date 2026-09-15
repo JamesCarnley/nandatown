@@ -232,3 +232,55 @@ def test_an_offer_a_bundle_did_not_record_a_fence_for_cannot_be_bound():
 
     assert stage(current, "duplicate_recognized").status != "passed"
     assert stage(replayed, "duplicate_recognized").status == "passed"
+
+
+@pytest.mark.parametrize("status", ["retryable", "received", "rejected",
+                                    "failed"])
+def test_only_a_processed_acknowledgement_of_the_offer_recognizes_it(status):
+    """The runner counts a duplicate as handled only when it is processed,
+    and the protocol asks sellers to acknowledge one that way. A retryable
+    acknowledgement is provisional besides; the evaluator must not pass a
+    run the runner is still waiting on."""
+    events = clean_events() + [offered(), ev(
+        12, "ack_recorded", "q-1", observer="seller", status=status,
+        note={"duplicate": True}, fence="fence-offer", attempt=2)]
+
+    result = evaluate(profile("duplicate_delivery"), "run-1", events)
+
+    assert stage(result, "duplicate_recognized").status != "passed"
+    assert _quiescent(profile("duplicate_delivery"),
+                      [e.model_dump() for e in events]) is False
+
+
+@pytest.mark.parametrize("status", ["retryable", "received"])
+def test_earlier_versions_still_count_any_status(status):
+    events = clean_events() + [offered(fence=None), ev(
+        12, "ack_recorded", "q-1", observer="seller", status=status,
+        note={"duplicate": True}, attempt=2)]
+
+    replayed = evaluate(profile("duplicate_delivery"), "run-1", events,
+                        version="0.4.0")
+
+    assert stage(replayed, "duplicate_recognized").status == "passed"
+
+
+def test_a_run_the_town_never_offered_a_duplicate_in_says_so():
+    """A seller that left before the offer was never offered anything."""
+    events = clean_events() + [acknowledged("fence-redelivery")]
+
+    note = stage(evaluate(profile("duplicate_delivery"), "run-1", events),
+                 "duplicate_recognized").note
+
+    assert "never offered" in note, note
+    assert "never acknowledged" not in note
+
+
+@pytest.mark.parametrize("fence", [["fence-offer"], {"f": 1}, 7])
+def test_a_crafted_acknowledgement_fence_cannot_break_evaluation(fence):
+    events = clean_events() + [offered(), ev(
+        12, "ack_recorded", "q-1", observer="seller", status="processed",
+        note={"duplicate": True}, fence=fence, attempt=2)]
+
+    result = evaluate(profile("duplicate_delivery"), "run-1", events)
+
+    assert stage(result, "duplicate_recognized").status != "passed"

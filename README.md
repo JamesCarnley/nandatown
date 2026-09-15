@@ -191,8 +191,8 @@ than treating the bundle as corrupt. The bundle's existing signature remains
 valid for its recorded bytes.
 
 The Track evaluator is `0.5.0`. Under `quote-duplicate-delivery` it recognises
-the injected duplicate only from an acknowledgement of that delivery, which the
-town names by recording the offer's fence; a seller that lost its lease also
+the injected duplicate only from a `processed` acknowledgement of that delivery,
+which the town names by recording the offer's fence; a seller that lost its lease also
 acknowledges the redelivery as a duplicate, but that earlier acknowledgement
 does not count, and the run waits for the offer to be acknowledged. Only the
 buyer's terminal acknowledgement of the response, any status but `retryable`,
