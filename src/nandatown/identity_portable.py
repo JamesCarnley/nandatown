@@ -13,10 +13,13 @@ source of authority becomes portable.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
+import secrets
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
@@ -70,13 +73,71 @@ def verify_signature(public_hex: str, payload: Any,
         return False
 
 
+def _agent_id(public_hex: str) -> str:
+    return "did:town:" + fingerprint(public_hex).removeprefix("sha256:")[:24]
+
+
 class Keystore:
-    """Controller keys on disk, plus the town's testnet registry."""
+    """Controller keys on disk, plus the town's testnet registry.
+
+    Several runs can share one keystore, as they share a Town home. So a
+    controller key, once written, is never replaced; a new key and its
+    registry entry are added under a lock; and a file is only ever
+    replaced whole, so a reader never sees one half written.
+    """
 
     def __init__(self, directory: str):
         self.directory = directory
         os.makedirs(directory, exist_ok=True)
         self.registry_path = os.path.join(directory, "registry.json")
+
+    @contextlib.contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the keystore's lock; the system releases it if we die."""
+        fd = os.open(os.path.join(self.directory, ".lock"),
+                     os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                while True:
+                    try:
+                        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                        break
+                    except OSError:
+                        continue  # LK_LOCK gives up after ten seconds
+                try:
+                    yield
+                finally:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+        finally:
+            os.close(fd)
+
+    def _staged(self, text: str, mode: int) -> str:
+        """A new file in the keystore holding text, written whole.
+
+        Created with mode as open() would apply it, under the umask, so a
+        replaced file keeps the permissions it had before.
+        """
+        staged = os.path.join(self.directory,
+                              f".staged-{secrets.token_hex(8)}")
+        fd = os.open(staged, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode)
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(staged)
+            raise
+        return staged
 
     def _registry(self) -> dict[str, Any]:
         if os.path.exists(self.registry_path):
@@ -85,32 +146,83 @@ class Keystore:
         return {}
 
     def _write_registry(self, registry: dict[str, Any]) -> None:
-        with open(self.registry_path, "w") as f:
-            json.dump(registry, f, indent=2, sort_keys=True)
+        # Replaced whole, so no reader sees it half written.
+        staged = self._staged(json.dumps(registry, indent=2, sort_keys=True),
+                              0o666)
+        try:
+            os.replace(staged, self.registry_path)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(staged)
+            raise
 
     def _key_path(self, name: str) -> str:
         return os.path.join(self.directory, f"{name}.controller.key")
 
-    def new_identity(self, name: str) -> dict[str, Any]:
-        if os.path.exists(self._key_path(name)):
-            return self.identity(name)
-        private = Ed25519PrivateKey.generate()
-        private_hex = private.private_bytes_raw().hex()
+    def _identity_from_key(self, name: str) -> dict[str, Any] | None:
+        """The identity the controller key on disk signs as, if any."""
+        path = self._key_path(name)
+        if not os.path.exists(path):
+            return None
+        private = Ed25519PrivateKey.from_private_bytes(
+            bytes.fromhex(self._controller_private(name)))
         public_hex = private.public_key().public_bytes_raw().hex()
-        agent_id = ("did:town:"
-                    + fingerprint(public_hex).removeprefix("sha256:")[:24])
-        with open(self._key_path(name), "w") as f:
-            f.write(private_hex + "\n")
-        os.chmod(self._key_path(name), 0o600)
-        registry = self._registry()
-        registry[agent_id] = {"name": name,
-                              "controller_public": public_hex,
-                              "registered_at": time.time()}
-        self._write_registry(registry)
-        return {"name": name, "agent_id": agent_id,
+        return {"name": name, "agent_id": _agent_id(public_hex),
                 "controller_public": public_hex}
 
+    def new_identity(self, name: str) -> dict[str, Any]:
+        existing = self._identity_from_key(name)
+        if existing is not None and existing["agent_id"] in self._registry():
+            return existing
+        with self._locked():
+            identity = self._identity_from_key(name)
+            if identity is None:
+                identity = self._publish_key(name)
+            # A key without its entry, left by a process that stopped
+            # between the two writes, is registered here.
+            registry = self._registry()
+            if identity["agent_id"] not in registry:
+                registry[identity["agent_id"]] = {
+                    "name": name,
+                    "controller_public": identity["controller_public"],
+                    "registered_at": time.time()}
+                self._write_registry(registry)
+            return identity
+
+    def _publish_key(self, name: str) -> dict[str, Any]:
+        """A new controller key for name, or the one another writer won.
+
+        The key is written whole under a staging name and then linked into
+        place, which fails rather than replace a key already there, even
+        one written by a Town that takes no lock.
+        """
+        private = Ed25519PrivateKey.generate()
+        staged = self._staged(private.private_bytes_raw().hex() + "\n", 0o600)
+        path = self._key_path(name)
+        try:
+            try:
+                os.link(staged, path)
+            except FileExistsError:
+                pass
+            except OSError:
+                # No hard links here. Under the lock, and with no key
+                # found, replacing is safe for every writer that locks.
+                if not os.path.exists(path):
+                    os.replace(staged, path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(staged)
+        identity = self._identity_from_key(name)
+        if identity is None:
+            raise IdentityError(f"no controller key stored for {name!r}")
+        return identity
+
     def identity(self, name: str) -> dict[str, Any]:
+        # A local key decides: a registry can name one agent more than
+        # once, as an earlier race between runs could leave it.
+        local = self._identity_from_key(name)
+        if local is not None:
+            return local
         for agent_id, entry in self._registry().items():
             if entry["name"] == name:
                 return {"name": name, "agent_id": agent_id,
