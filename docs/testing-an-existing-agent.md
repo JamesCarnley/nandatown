@@ -71,6 +71,22 @@ part containing the JSON quote on each attempt. Multiple text parts or a task
 still marked `working` do not meet that contract. This is a small synthetic
 workflow, not a universal A2A output rule.
 
+An endpoint behind basic authentication can take its credentials in the URL,
+as `http://user:password@host:port`. Town sends them to that endpoint and
+records none of it: output, evidence and Pulse history show the URL with its
+credentials as `<credentials 1a2b3c4d>`, a digest keyed by a secret in your
+Town home, so two sets of credentials for one host stay distinguishable without
+revealing either. Receipts show `<credentials withheld>`, and so does anything
+recorded while that key cannot be read or created. The recorded rerun asks for
+the URL again, because the credentials were never written down. Credentials are
+found where httpx finds them, so a password may contain quotes, brackets or
+spaces; one containing `#`, `/` or `?` makes the URL unusable, and it is still
+not shown. Only credentials in the URL's user information are recognised, not a
+token in a query string or header. Labels belong to one Town home: Pulse history
+read from another home labels its older entries afresh. Evidence recorded by an earlier Town still holds
+credentials on disk: reports and new receipts withhold them, but the bundle
+itself is left as recorded, so rerun rather than share it.
+
 For local A2A calibration, run `nandatown a2a serve --port 8940` in another
 terminal first. Stop it with Ctrl-C when finished. To test your own agent,
 replace that server with your agent and use its actual URL.
