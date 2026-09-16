@@ -10,6 +10,19 @@ function s(value: unknown): string {
 }
 
 /**
+ * Source syntax only, as the submission form checks it. It does not
+ * authorize a fetch or attest that the URL answers.
+ */
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * GET /api/skills
  * Returns every submitted SkillMD as JSON. An agent can call this to
  * discover which skills are available.
@@ -56,6 +69,12 @@ export async function POST(request: NextRequest) {
   if ((sourceType === "url" || sourceType === "github") && !sourceUrl) {
     return Response.json(
       { error: "source_url is required for url/github submissions" },
+      { status: 400 },
+    );
+  }
+  if ((sourceType === "url" || sourceType === "github") && !isValidHttpUrl(sourceUrl)) {
+    return Response.json(
+      { error: "source_url must be a valid http(s) URL" },
       { status: 400 },
     );
   }
