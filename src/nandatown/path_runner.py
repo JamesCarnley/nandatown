@@ -35,6 +35,7 @@ from .a2a_transport import (
     validate_response_budget,
 )
 from .path_profiles import (
+    CITY_PATH_EVALUATOR,
     DEFAULT_PATH_PROFILE, PATH_EVALUATOR, QUOTE_INTENT_EVALUATOR,
     QUOTE_INTENT_FIELDS, STRICT_PATH_EVALUATOR,
     STRICT_QUOTE_INTENT_EVALUATOR, PathProfile, get_path_profile,
@@ -68,6 +69,8 @@ QUOTE_INTENT_EVALUATORS = {
 
 
 def path_evaluator_version(profile: PathProfile) -> str:
+    if profile.evaluator == CITY_PATH_EVALUATOR:
+        return "path-city-a2a-protocol-0.1"
     if profile.evaluator == STRICT_PATH_EVALUATOR:
         return STRICT_PATH_EVALUATOR_VERSION
     if profile.evaluator == STRICT_QUOTE_INTENT_EVALUATOR:
@@ -440,6 +443,8 @@ def run_path_test(subject_url: str | None, out_dir: str,
         raise ValueError("an index file needs an agent name to choose its"
                          " entry")
     profile = get_path_profile(profile_ref or DEFAULT_PATH_PROFILE)
+    if profile.evaluator == CITY_PATH_EVALUATOR:
+        raise ValueError("City structured tasks require python -m nandatown.city_path")
     strict_semantics = _strict_path_semantics(profile)
     run_id = "path-" + uuid.uuid4().hex[:12]
     nonce = uuid.uuid4().hex[:10]
@@ -657,6 +662,9 @@ def evaluate_path(profile: PathProfile, run_id: str,
     """Stage results derived purely from the recorded observations, so
     any holder of the bundle can replay this judgment."""
 
+    if profile.evaluator == CITY_PATH_EVALUATOR:
+        from .city_path import evaluate_city_path
+        return evaluate_city_path(profile, run_id, events)
     strict_semantics = _strict_path_semantics(profile)
 
     def find(kind: str, **conds) -> list[TownEvent]:

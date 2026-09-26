@@ -19,6 +19,7 @@ PATH_EVALUATOR = "path-evaluator@0.1"
 STRICT_PATH_EVALUATOR = "path-evaluator@0.2"
 QUOTE_INTENT_EVALUATOR = "quote-intent-evaluator@0.1"
 STRICT_QUOTE_INTENT_EVALUATOR = "quote-intent-evaluator@0.2"
+CITY_PATH_EVALUATOR = "city-a2a-protocol-evaluator@0.1"
 QUOTE_INTENT_FIELDS = ("sku", "color", "quantity", "merchant_id", "currency")
 
 
@@ -44,6 +45,24 @@ class PathProfile(BaseModel):
 
 
 PATH_PROFILES: dict[str, PathProfile] = {
+    "city-a2a-protocol@0.1": PathProfile(
+        profile_id="city-a2a-protocol", version="0.1", protocol="a2a",
+        capability="city-a2a-structured-task",
+        request={"source": "manifest-bound synthetic signed JSON-RPC bytes",
+                 "method": "message/send", "retry": "identical bytes"},
+        expected={"protocol_version": "0.3.0",
+                  "request_type": "org.nandacity.city-request",
+                  "result_type": "org.nandacity.city-result",
+                  "required_stages": ["pinned_card", "structured_send",
+                                      "acceptance_task", "exact_retry",
+                                      "terminal_task"]},
+        controlled_condition="duplicate_request",
+        limits={"run_seconds": 30.0, "response_seconds": 5.0,
+                "max_card_bytes": 65_536, "max_message_bytes": 1_048_576,
+                "max_http_bytes": 4_194_304, "max_polls": 20,
+                "max_json_depth": 32},
+        evaluator=CITY_PATH_EVALUATOR,
+    ),
     "a2a-quote-intent@0.1": PathProfile(
         profile_id="a2a-quote-intent",
         version="0.1",
